@@ -33,12 +33,13 @@ export interface MissionRun {
  */
 export async function runMission(intent: string, input: MissionInput, now: number): Promise<MissionRun> {
   const log = input.onLog ?? (() => {})
-  const brain = input.brain ?? new DeterministicBrain()
+  const brain: Brain = input.brain ?? new DeterministicBrain()
   const cg = new CapabilityGraph()
   seedFamilyCapabilities(cg)
 
   const mission = new MissionGraph('m', intent, `resolve: ${intent}`)
-  for (const g of brain.decompose(intent, mission.id)) mission.addGoal(g)
+  const goals = brain.decomposeAsync ? await brain.decomposeAsync(intent, mission.id) : brain.decompose(intent, mission.id)
+  for (const g of goals) mission.addGoal(g)
 
   // ── Observe: fan out across the real senses the mission needs, in parallel ──
   const jobs: Array<Promise<void>> = []
@@ -63,7 +64,10 @@ export async function runMission(intent: string, input: MissionInput, now: numbe
 
   // ── Infer: the brain fuses the observations into one conclusion ─────────────
   log('brain: synthesizing…')
-  mission.addClaim(brain.synthesize(intent, mission.id, mission.allClaims(), now))
+  const conclusion = brain.synthesizeAsync
+    ? await brain.synthesizeAsync(intent, mission.id, mission.allClaims(), now)
+    : brain.synthesize(intent, mission.id, mission.allClaims(), now)
+  mission.addClaim(conclusion)
   mission.setGoalStatus('g.assess', 'satisfied')
   mission.setGoalStatus('g.conclude', 'satisfied')
 

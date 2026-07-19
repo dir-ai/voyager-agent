@@ -15,6 +15,10 @@ export interface Brain {
   pickNext(state: MissionState): NextProbe | null
   /** Fuse the gathered claims into one conclusion (an `infer` claim). */
   synthesize(intent: string, missionId: string, claims: readonly CognitiveClaim[], now: number): CognitiveClaim
+  /** Optional model-backed variants. When present, `runMission` prefers them;
+   *  a brain that only reasons synchronously (e.g. DeterministicBrain) omits them. */
+  decomposeAsync?(intent: string, missionId: string): Promise<Goal[]>
+  synthesizeAsync?(intent: string, missionId: string, claims: readonly CognitiveClaim[], now: number): Promise<CognitiveClaim>
 }
 
 export class DeterministicBrain implements Brain {

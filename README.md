@@ -82,19 +82,29 @@ console.log(mission.state().contradictions)  // where two senses disagree
 ### Bring your own model
 
 The `Brain` interface is the whole point — it's where an LLM plugs in without
-touching the senses, the memory, or the mission machinery:
+touching the senses, the memory, or the mission machinery. A ready-made
+`LlmBrain` ships: give it one **model-agnostic** `complete()` function and it
+plans and synthesizes through the model. Wire Claude, a local server, or any
+OpenAI-compatible endpoint — Voyager never depends on a specific SDK.
 
 ```ts
-import { runMission, type Brain } from '@dir-ai/voyager-agent'
+import { runMission, LlmBrain } from '@dir-ai/voyager-agent'
 
-const llmBrain: Brain = {
-  decompose(intent, missionId) { /* ask the model for a goal graph */ },
-  pickNext(state) { return state.bestNextProbe },
-  synthesize(intent, missionId, claims, now) { /* ask the model to fuse the claims */ },
-}
+const brain = new LlmBrain({
+  // Return the model's text for these messages — that's the whole dependency.
+  async complete(messages) {
+    const res = await myModel.chat(messages)   // Claude, local, OpenAI-compatible…
+    return res.text
+  },
+})
 
-await runMission('…', { repoPath: '.', brain: llmBrain }, Date.now())
+await runMission('audit this repo and my host', { repoPath: '.', brain }, Date.now())
 ```
+
+`LlmBrain` is **fail-safe**: if the model errors or returns unparseable output,
+it degrades to the built-in rule-based brain for that step — a bad completion
+can never take a mission down, only make it less clever once. You can also
+implement the `Brain` interface directly for full control.
 
 ## How it works
 

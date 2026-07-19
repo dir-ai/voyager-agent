@@ -8,5 +8,6 @@
 // injected (Brain) and swappable.
 export { runMission, type MissionInput, type MissionRun } from './agent.js'
 export { type Brain, DeterministicBrain } from './brain.js'
+export { LlmBrain, type Complete, type ChatMessage, type LlmBrainOptions, extractJson } from './llm-brain.js'
 export { netBriefToClaim, repoBriefToClaim } from './adapters.js'
 export { VERSION } from './version.js'
