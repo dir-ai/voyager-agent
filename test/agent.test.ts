@@ -7,6 +7,7 @@ import { DeterministicBrain } from '../dist/brain.js'
 import { LlmBrain, extractJson } from '../dist/llm-brain.js'
 import { runMission } from '../dist/agent.js'
 import { ERROR_CLAIM_CONFIDENCE, USABLE_OBSERVATION_CONFIDENCE } from '../dist/constants.js'
+import { newClaim } from '@dir-ai/voyager-contract'
 
 const NOW = 1_700_000_000_000
 
@@ -200,4 +201,41 @@ test('runMission: an LlmBrain drives decompose + synthesize through the async pa
   const infer = mission.allClaims().find((c) => c.operation === 'infer')
   assert.ok(infer)
   assert.match(infer!.verdict, /nothing observed/) // the model's verdict won
+})
+
+// ── Iterative loop (pickNext is no longer dead code) ───────────────────────
+
+test('iterative loop: runs bounded rounds via an injected dispatch, then concludes', async () => {
+  let calls = 0
+  const dispatch = async (_probe: unknown, ctx: { missionId: string; now: number }) => {
+    calls++
+    // Each probe-driven claim surfaces a FRESH probe so the loop keeps re-planning.
+    // Strictly increasing gain so the freshest probe always wins pickNext (no tie
+    // with an already-acted probe that would break the loop early).
+    return newClaim({ missionId: ctx.missionId, sense: 'repo', operation: 'observe', verdict: `probe round ${calls}`, confidence: 0.7, suggestedNextProbes: [{ sense: 'repo', description: `next-${calls + 1}`, expectedInformationGain: 10 + calls, cost: 1 }] }, ctx.now)
+  }
+  const { mission } = await runMission('probe iteratively', { repoPath: '.', maxRounds: 3, dispatch: dispatch as never }, NOW)
+  assert.equal(calls, 3, 'the loop runs exactly maxRounds when probes keep coming')
+  assert.ok(mission.allClaims().some((c) => /probe round 1/.test(c.verdict)))
+  assert.ok(mission.allClaims().some((c) => c.operation === 'verify'))
+})
+
+test('iterative loop: stops immediately when a probe is not dispatchable (null)', async () => {
+  let calls = 0
+  const dispatch = async () => {
+    calls++
+    return null
+  }
+  await runMission('probe once', { repoPath: '.', maxRounds: 5, dispatch: dispatch as never }, NOW)
+  assert.equal(calls, 1, 'a non-dispatchable probe stops the loop after one attempt')
+})
+
+test('iterative loop: maxRounds 0 disables iteration entirely', async () => {
+  let calls = 0
+  const dispatch = async () => {
+    calls++
+    return null
+  }
+  await runMission('no loop', { repoPath: '.', maxRounds: 0, dispatch: dispatch as never }, NOW)
+  assert.equal(calls, 0)
 })

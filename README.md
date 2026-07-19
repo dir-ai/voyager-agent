@@ -42,6 +42,12 @@ Senses fan out in parallel and are **resilient**: a sense that errors (or even
 throws) becomes a low-confidence, flagged observation — it never crashes the
 mission or discards a sibling sense's good result.
 
+The mission then **re-plans**: it picks the single most informative next probe
+(by information gain) and executes it, bounded by `maxRounds`. How a probe is
+executed is an injectable `dispatch` seam (the model decides); the safe default
+only ever *re-reads* (deepens repo dependency-vetting) and never acts. A `verify`
+claim closes the mission so `state().satisfied` is meaningful.
+
 ```
 Voyager — one agent, one entry.
 goal: "orient in this repo and flag risk"

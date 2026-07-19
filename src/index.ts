@@ -6,7 +6,7 @@
 // output into a live mission, and concludes — WITHOUT absorbing them into a
 // monolith and WITHOUT acting on production autonomously. The reasoning model is
 // injected (Brain) and swappable.
-export { runMission, type MissionInput, type MissionRun } from './agent.js'
+export { runMission, type MissionInput, type MissionRun, type ProbeContext } from './agent.js'
 export { type Brain, DeterministicBrain } from './brain.js'
 export { LlmBrain, type Complete, type ChatMessage, type LlmBrainOptions, extractJson } from './llm-brain.js'
 export { netBriefToClaim, repoBriefToClaim, browserBriefToClaim } from './adapters.js'
