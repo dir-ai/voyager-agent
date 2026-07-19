@@ -1,0 +1,59 @@
+import { newClaim, type CognitiveClaim, type Entity, type Evidence, type NextProbe } from '@dir-ai/voyager-contract'
+import type { NetBrief } from '@dir-ai/voyager-net'
+import type { OrientationBrief } from '@dir-ai/voyager-repo'
+
+const sevToConfidence: Record<string, number> = { critical: 0.95, high: 0.9, medium: 0.75, low: 0.6, info: 0.5 }
+
+/** voyager-net's NetBrief → a CognitiveClaim the mission graph can reason over.
+ *  A tool error becomes an `observe` claim flagged unknown, never a false verdict. */
+export function netBriefToClaim(brief: NetBrief, missionId: string, now: number, goalId?: string): CognitiveClaim {
+  if (brief.error) {
+    return newClaim({ missionId, goalId, sense: 'net', capability: 'net.scan', operation: 'observe', verdict: `could not audit ${brief.target.input}: ${brief.error}`, confidence: 0.2, unknowns: [brief.error] }, now)
+  }
+  const host = brief.target.host ?? brief.target.input
+  const entities: Entity[] = [{ id: `net:host:${host}`, sense: 'net', kind: 'host', label: host }]
+  const evidence: Evidence[] = []
+  for (const p of brief.ports.filter((x) => x.state === 'open')) {
+    entities.push({ id: `net:port:${host}:${p.port}`, sense: 'net', kind: 'port', label: `${p.port}${p.service ? `/${p.service}` : ''}` })
+    if (p.product) entities.push({ id: `net:service:${p.product}${p.version ? `@${p.version}` : ''}`, sense: 'net', kind: 'service', label: `${p.product} ${p.version ?? ''}`.trim() })
+  }
+  for (const f of brief.findings) evidence.push({ what: `[${f.severity}] ${f.kind}: ${f.detail}`, at: f.at, framed: true, provenance: { source: 'voyager-net', capabilityId: 'net.scan', fetchedAt: now } })
+
+  const worst = brief.findings.reduce((m, f) => Math.max(m, sevToConfidence[f.severity] ?? 0), 0)
+  const nextProbes: NextProbe[] = brief.suggestedNextProbes.map((s) => ({ sense: 'net', description: s, expectedInformationGain: 0.4, cost: 3 }))
+
+  return newClaim({
+    missionId, goalId, sense: 'net', capability: 'net.scan', operation: 'observe',
+    verdict: brief.summary,
+    confidence: brief.findings.length ? Math.max(0.6, worst) : 0.7,
+    evidence, entities, suggestedNextProbes: nextProbes,
+    relationships: brief.ports.filter((p) => p.state === 'open' && p.product).map((p) => ({ from: `net:host:${host}`, to: `net:service:${p.product}${p.version ? `@${p.version}` : ''}`, kind: 'runs-on', confidence: 0.8 })),
+    memoryCandidates: brief.findings.filter((f) => f.severity === 'high' || f.severity === 'critical').map((f) => ({ kind: 'semantic', statement: `${host}: ${f.detail}`, scope: host })),
+  }, now)
+}
+
+/** voyager-repo's OrientationBrief → a CognitiveClaim. */
+export function repoBriefToClaim(brief: OrientationBrief, missionId: string, now: number, goalId?: string): CognitiveClaim {
+  if (brief.error) {
+    return newClaim({ missionId, goalId, sense: 'repo', capability: 'repo.scout', operation: 'observe', verdict: `could not orient in the repo: ${brief.error}`, confidence: 0.2, unknowns: [brief.error] }, now)
+  }
+  const name = brief.manifest?.name ?? brief.target.resolvedPath ?? 'repo'
+  const entities: Entity[] = [{ id: `repo:project:${name}`, sense: 'repo', kind: 'project', label: name }]
+  for (const e of brief.structure?.entrypoints ?? []) entities.push({ id: `repo:file:${e}`, sense: 'repo', kind: 'file', label: e })
+  const evidence: Evidence[] = brief.risks.map((r) => ({ what: `[${r.level}] ${r.kind}: ${r.detail}`, at: r.path, framed: true, provenance: { source: 'voyager-repo', capabilityId: 'repo.scout', fetchedAt: now } }))
+
+  const rejectedDeps = brief.dependencies.findings.filter((d) => d.verdict === 'rejected')
+  for (const d of rejectedDeps) entities.push({ id: `repo:dep:${d.name}`, sense: 'repo', kind: 'dep', label: d.name })
+  const worstRisk = brief.risks.some((r) => r.level === 'high') || rejectedDeps.length ? 0.85 : brief.risks.length ? 0.7 : 0.65
+
+  return newClaim({
+    missionId, goalId, sense: 'repo', capability: 'repo.scout', operation: 'observe',
+    verdict: brief.summary,
+    confidence: worstRisk,
+    evidence, entities,
+    suggestedNextProbes: brief.suggestedNextProbe.map((s) => ({ sense: 'repo', description: s, expectedInformationGain: 0.35, cost: 2 })),
+    relationships: rejectedDeps.map((d) => ({ from: `repo:project:${name}`, to: `repo:dep:${d.name}`, kind: 'depends-on', confidence: 0.9 })),
+    unknowns: brief.approach.withheld.map((w) => `withheld until consent: ${w}`),
+    memoryCandidates: rejectedDeps.map((d) => ({ kind: 'semantic', statement: `${name} depends on ${d.name} which Voyager rejected: ${d.note ?? 'unsafe'}`, scope: name })),
+  }, now)
+}
