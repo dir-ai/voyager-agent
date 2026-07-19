@@ -1,6 +1,7 @@
 import type { CognitiveClaim, Goal, MissionState, NextProbe } from '@dir-ai/voyager-contract'
 import { newClaim } from '@dir-ai/voyager-contract'
 import { type Brain, DeterministicBrain } from './brain.js'
+import { USABLE_OBSERVATION_CONFIDENCE } from './constants.js'
 
 /** A single turn to the model. Kept minimal + provider-agnostic on purpose. */
 export interface ChatMessage {
@@ -80,7 +81,7 @@ export class LlmBrain implements Brain {
 
   /** Model-fused conclusion. Falls back to the deterministic fusion on any failure. */
   async synthesizeAsync(intent: string, missionId: string, claims: readonly CognitiveClaim[], now: number): Promise<CognitiveClaim> {
-    const observations = claims.filter((c) => c.operation === 'observe' && c.confidence >= 0.4)
+    const observations = claims.filter((c) => c.operation === 'observe' && c.confidence >= USABLE_OBSERVATION_CONFIDENCE)
     try {
       if (!observations.length) throw new Error('no usable observations to fuse')
       const digest = observations.map((c) => ({
@@ -102,9 +103,10 @@ export class LlmBrain implements Brain {
 
       // Reuse the deterministic fusion for the structured graph (entities,
       // relationships, probes, memory), then override verdict + confidence with
-      // the model's calibrated judgement. Best of both: rich graph, smart prose.
+      // the model's calibrated judgement. `strength: undefined` forces newClaim to
+      // RE-derive strength from the overriding confidence (no 90%·weak desync).
       const base = this.fallback.synthesize(intent, missionId, claims, now)
-      return newClaim({ ...base, verdict, confidence, id: base.id }, now)
+      return newClaim({ ...base, verdict, confidence, strength: undefined, id: base.id }, now)
     } catch (e) {
       this.onFallback('synthesize', e instanceof Error ? e.message : String(e))
       return this.fallback.synthesize(intent, missionId, claims, now)
@@ -119,15 +121,26 @@ export function extractJson(text: string): unknown {
   try {
     return JSON.parse(stripped)
   } catch {
-    // find the first balanced {...} or [...] span
+    // Find the first balanced {...} or [...] span, STRING-AWARE so braces/brackets
+    // inside JSON string values (or an escaped quote) can't mis-terminate the scan.
     const start = stripped.search(/[[{]/)
     if (start < 0) return null
     const open = stripped[start]
     const close = open === '[' ? ']' : '}'
     let depth = 0
+    let inStr = false
+    let escaped = false
     for (let i = start; i < stripped.length; i++) {
-      if (stripped[i] === open) depth++
-      else if (stripped[i] === close && --depth === 0) {
+      const ch = stripped[i]
+      if (inStr) {
+        if (escaped) escaped = false
+        else if (ch === '\\') escaped = true
+        else if (ch === '"') inStr = false
+        continue
+      }
+      if (ch === '"') inStr = true
+      else if (ch === open) depth++
+      else if (ch === close && --depth === 0) {
         try {
           return JSON.parse(stripped.slice(start, i + 1))
         } catch {

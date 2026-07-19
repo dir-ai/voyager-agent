@@ -28,10 +28,10 @@ const HELP = `voyager-agent v${VERSION} — one universal Voyager, one entry
 
 USAGE
   voyager-agent mission "<goal>" [--repo <path>] [--host <domain> --authorized]
-                                 [--check-deps N] [--json]
-        Describe the goal; Voyager activates the senses it needs (repo, net),
-        runs a live mission through the cognitive contract, and concludes.
-        --authorized is required to audit a host (voyager-net is fail-closed).
+                                 [--url <http-url>] [--check-deps N] [--json]
+        Describe the goal; Voyager activates the senses it needs (repo, net,
+        browser), runs a live mission through the cognitive contract, and
+        concludes. --authorized is required to audit a host (fail-closed).
 
   voyager-agent mcp
         Run as an MCP server (stdio) exposing one tool: run_mission.
@@ -60,13 +60,20 @@ async function main(): Promise<number> {
 
   const intent = positionals[0]
   if (!intent) { console.error('mission needs a goal in quotes.'); return 2 }
+  // A value-flag given with no value (or immediately followed by another --flag)
+  // parses as boolean true — warn instead of silently dropping the request.
+  for (const k of ['repo', 'host', 'url']) {
+    if (flags[k] === true) { console.error(`\x1b[33mwarning:\x1b[0m --${k} needs a value (e.g. --${k} <value>) — ignoring it`); }
+  }
+  const checkDepsRaw = typeof flags['check-deps'] === 'string' ? Number(flags['check-deps']) || 0 : 0
   const { mission, capabilities } = await runMission(
     intent,
     {
       repoPath: typeof flags.repo === 'string' ? flags.repo : undefined,
       host: typeof flags.host === 'string' ? flags.host : undefined,
+      url: typeof flags.url === 'string' ? flags.url : undefined,
       authorized: flags.authorized === true,
-      checkDeps: typeof flags['check-deps'] === 'string' ? Number(flags['check-deps']) || 0 : 0,
+      checkDeps: Math.min(50, Math.max(0, checkDepsRaw)), // cap matches the MCP schema
       onLog: (l) => { if (!json) console.error(`  · ${l}`) },
     },
     Date.now(),

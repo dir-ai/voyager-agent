@@ -13,6 +13,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { runMission } from './agent.js'
+import { USABLE_OBSERVATION_CONFIDENCE } from './constants.js'
 import { VERSION } from './version.js'
 
 const server = new Server({ name: 'voyager-agent', version: VERSION }, { capabilities: { tools: {} } })
@@ -29,6 +30,7 @@ const TOOLS = [
         intent: { type: 'string', minLength: 1, maxLength: 400, description: 'The goal, in plain language.' },
         repoPath: { type: 'string', maxLength: 1024, description: 'A local repository path to orient in.' },
         host: { type: 'string', maxLength: 253, description: 'A single host/domain you own, to audit.' },
+        url: { type: 'string', maxLength: 2048, description: 'A live http(s) URL to observe (read-only page sense).' },
         authorized: { type: 'boolean', description: 'Assert you own/are permitted to test `host`. Required to audit it.' },
         checkDeps: { type: 'integer', minimum: 0, maximum: 50, description: 'Verify up to N dependencies during the repo scout.' },
       },
@@ -54,6 +56,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         {
           repoPath: typeof a.repoPath === 'string' ? a.repoPath : undefined,
           host: typeof a.host === 'string' ? a.host : undefined,
+          url: typeof a.url === 'string' ? a.url : undefined,
           authorized: a.authorized === true,
           checkDeps: typeof a.checkDeps === 'number' && Number.isInteger(a.checkDeps) ? a.checkDeps : 0,
         },
@@ -61,8 +64,11 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         Date.now(),
       )
       const claims = mission.allClaims()
-      const senseErrored = claims.some((c) => c.operation === 'observe' && c.confidence < 0.4)
-      return ok({ intent: mission.intent, claims, state: mission.state(), memory: mission.memoryHarvest() }, senseErrored)
+      // isError means the mission COULD NOT RUN (no usable observation at all) —
+      // NOT that one of several senses returned an error brief (that's in the
+      // claims' `unknowns`). A partial success (one good sense) is not an error.
+      const usable = claims.some((c) => c.operation === 'observe' && c.confidence >= USABLE_OBSERVATION_CONFIDENCE)
+      return ok({ intent: mission.intent, claims, state: mission.state(), memory: mission.memoryHarvest() }, !usable)
     }
     return err(`Unknown tool: ${name}`)
   } catch (e) {

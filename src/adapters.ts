@@ -1,6 +1,8 @@
 import { newClaim, type CognitiveClaim, type Entity, type Evidence, type NextProbe } from '@dir-ai/voyager-contract'
 import type { NetBrief } from '@dir-ai/voyager-net'
 import type { OrientationBrief } from '@dir-ai/voyager-repo'
+import type { PageBrief } from '@dir-ai/voyager-browser'
+import { ERROR_CLAIM_CONFIDENCE } from './constants.js'
 
 const sevToConfidence: Record<string, number> = { critical: 0.95, high: 0.9, medium: 0.75, low: 0.6, info: 0.5 }
 
@@ -8,7 +10,7 @@ const sevToConfidence: Record<string, number> = { critical: 0.95, high: 0.9, med
  *  A tool error becomes an `observe` claim flagged unknown, never a false verdict. */
 export function netBriefToClaim(brief: NetBrief, missionId: string, now: number, goalId?: string): CognitiveClaim {
   if (brief.error) {
-    return newClaim({ missionId, goalId, sense: 'net', capability: 'net.scan', operation: 'observe', verdict: `could not audit ${brief.target.input}: ${brief.error}`, confidence: 0.2, unknowns: [brief.error] }, now)
+    return newClaim({ missionId, goalId, sense: 'net', capability: 'net.scan', operation: 'observe', verdict: `could not audit ${brief.target.input}: ${brief.error}`, confidence: ERROR_CLAIM_CONFIDENCE, unknowns: [brief.error] }, now)
   }
   const host = brief.target.host ?? brief.target.input
   const entities: Entity[] = [{ id: `net:host:${host}`, sense: 'net', kind: 'host', label: host }]
@@ -35,7 +37,7 @@ export function netBriefToClaim(brief: NetBrief, missionId: string, now: number,
 /** voyager-repo's OrientationBrief → a CognitiveClaim. */
 export function repoBriefToClaim(brief: OrientationBrief, missionId: string, now: number, goalId?: string): CognitiveClaim {
   if (brief.error) {
-    return newClaim({ missionId, goalId, sense: 'repo', capability: 'repo.scout', operation: 'observe', verdict: `could not orient in the repo: ${brief.error}`, confidence: 0.2, unknowns: [brief.error] }, now)
+    return newClaim({ missionId, goalId, sense: 'repo', capability: 'repo.scout', operation: 'observe', verdict: `could not orient in the repo: ${brief.error}`, confidence: ERROR_CLAIM_CONFIDENCE, unknowns: [brief.error] }, now)
   }
   const name = brief.manifest?.name ?? brief.target.resolvedPath ?? 'repo'
   const entities: Entity[] = [{ id: `repo:project:${name}`, sense: 'repo', kind: 'project', label: name }]
@@ -55,5 +57,35 @@ export function repoBriefToClaim(brief: OrientationBrief, missionId: string, now
     relationships: rejectedDeps.map((d) => ({ from: `repo:project:${name}`, to: `repo:dep:${d.name}`, kind: 'depends-on', confidence: 0.9 })),
     unknowns: brief.approach.withheld.map((w) => `withheld until consent: ${w}`),
     memoryCandidates: rejectedDeps.map((d) => ({ kind: 'semantic', statement: `${name} depends on ${d.name} which Voyager rejected: ${d.note ?? 'unsafe'}`, scope: name })),
+  }, now)
+}
+
+/** voyager-browser's PageBrief → a CognitiveClaim. A client-rendered page marks
+ *  itself PARTIAL via an unknown, so the mission knows the static fetch saw a
+ *  shell, not the SPA runtime. A tool error becomes a flagged-unknown observe. */
+export function browserBriefToClaim(brief: PageBrief, missionId: string, now: number, goalId?: string): CognitiveClaim {
+  if (brief.error) {
+    return newClaim({ missionId, goalId, sense: 'web', capability: 'browser.observe', operation: 'observe', verdict: `could not observe ${brief.target.input}: ${brief.error}`, confidence: ERROR_CLAIM_CONFIDENCE, unknowns: [brief.error] }, now)
+  }
+  const origin = brief.target.origin ?? brief.target.url ?? brief.target.input
+  const entities: Entity[] = [{ id: `web:page:${brief.target.url ?? origin}`, sense: 'web', kind: 'page', label: origin }]
+  for (const o of brief.security?.thirdPartyScripts ?? []) entities.push({ id: `web:origin:${o}`, sense: 'web', kind: 'origin', label: o })
+  for (const f of brief.forms.filter((x) => x.sensitive)) entities.push({ id: `web:form:${f.action}`, sense: 'web', kind: 'form', label: f.action })
+
+  const evidence: Evidence[] = brief.findings.map((f) => ({ what: `[${f.severity}] ${f.kind}: ${f.detail}`, at: f.at, framed: true, provenance: { source: 'voyager-browser', capabilityId: 'browser.observe', fetchedAt: now } }))
+  const worst = brief.findings.reduce((m, f) => Math.max(m, sevToConfidence[f.severity] ?? 0), 0)
+
+  const unknowns: string[] = []
+  if (brief.render !== 'static') unknowns.push(`static fetch saw a ${brief.render} page — client-rendered content was NOT observed`)
+  if (brief.truncated) unknowns.push('page body was truncated — observation is partial')
+
+  return newClaim({
+    missionId, goalId, sense: 'web', capability: 'browser.observe', operation: 'observe',
+    verdict: brief.summary,
+    confidence: brief.render !== 'static' || brief.truncated ? 0.5 : brief.findings.length ? Math.max(0.6, worst) : 0.7,
+    evidence, entities, unknowns,
+    suggestedNextProbes: brief.suggestedNextProbes.map((s) => ({ sense: 'web', description: s, expectedInformationGain: 0.35, cost: 2 })),
+    relationships: (brief.security?.thirdPartyScripts ?? []).map((o) => ({ from: `web:page:${brief.target.url ?? origin}`, to: `web:origin:${o}`, kind: 'depends-on', confidence: 0.7 })),
+    memoryCandidates: brief.findings.filter((f) => f.severity === 'high' || f.severity === 'critical').map((f) => ({ kind: 'semantic', statement: `${origin}: ${f.detail}`, scope: origin })),
   }, now)
 }

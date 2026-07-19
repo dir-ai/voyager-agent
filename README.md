@@ -31,9 +31,16 @@ voyager-agent mission "audit this project" --repo .
 # Audit ONE host you own (voyager-net — fail-closed, needs --authorized)
 voyager-agent mission "check my server's exposure" --host example.com --authorized
 
-# Both senses in one mission; vet 10 dependencies; machine-readable
-voyager-agent mission "full audit" --repo . --host example.com --authorized --check-deps 10 --json
+# Observe a live page (voyager-browser — read-only, static HTML)
+voyager-agent mission "check my landing page" --url https://example.com
+
+# All three senses in one mission; vet 10 dependencies; machine-readable
+voyager-agent mission "full audit" --repo . --host example.com --authorized --url https://example.com --check-deps 10 --json
 ```
+
+Senses fan out in parallel and are **resilient**: a sense that errors (or even
+throws) becomes a low-confidence, flagged observation — it never crashes the
+mission or discards a sibling sense's good result.
 
 ```
 Voyager — one agent, one entry.

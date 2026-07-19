@@ -1,5 +1,6 @@
 import type { CognitiveClaim, Goal, MissionState, NextProbe } from '@dir-ai/voyager-contract'
 import { newClaim } from '@dir-ai/voyager-contract'
+import { USABLE_OBSERVATION_CONFIDENCE } from './constants.js'
 
 /**
  * The reasoning brain — the MODEL-INDEPENDENT seam. An LLM implements this
@@ -37,9 +38,9 @@ export class DeterministicBrain implements Brain {
 
   synthesize(intent: string, missionId: string, claims: readonly CognitiveClaim[], now: number): CognitiveClaim {
     // A usable observation is any observe claim that isn't a sense error. Errors
-    // are minted at very low confidence (≈0.2); a healthy observation still
-    // carries `unknowns` (e.g. consent-withheld actions) and must NOT be discarded.
-    const observations = claims.filter((c) => c.operation === 'observe' && c.confidence >= 0.4)
+    // are minted at very low confidence; a healthy observation still carries
+    // `unknowns` (e.g. consent-withheld actions) and must NOT be discarded.
+    const observations = claims.filter((c) => c.operation === 'observe' && c.confidence >= USABLE_OBSERVATION_CONFIDENCE)
     const sensesSeen = [...new Set(observations.map((c) => c.sense))]
     const allEvidence = observations.flatMap((c) => c.evidence)
     const highSignals = allEvidence.filter((e) => /\[(high|critical)\]/i.test(e.what))

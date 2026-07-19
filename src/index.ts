@@ -9,5 +9,6 @@
 export { runMission, type MissionInput, type MissionRun } from './agent.js'
 export { type Brain, DeterministicBrain } from './brain.js'
 export { LlmBrain, type Complete, type ChatMessage, type LlmBrainOptions, extractJson } from './llm-brain.js'
-export { netBriefToClaim, repoBriefToClaim } from './adapters.js'
+export { netBriefToClaim, repoBriefToClaim, browserBriefToClaim } from './adapters.js'
+export { ERROR_CLAIM_CONFIDENCE, USABLE_OBSERVATION_CONFIDENCE } from './constants.js'
 export { VERSION } from './version.js'

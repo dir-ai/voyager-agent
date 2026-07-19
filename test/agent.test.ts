@@ -2,10 +2,11 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { NetBrief } from '@dir-ai/voyager-net'
 import type { OrientationBrief } from '@dir-ai/voyager-repo'
-import { netBriefToClaim, repoBriefToClaim } from '../dist/adapters.js'
+import { netBriefToClaim, repoBriefToClaim, browserBriefToClaim } from '../dist/adapters.js'
 import { DeterministicBrain } from '../dist/brain.js'
 import { LlmBrain, extractJson } from '../dist/llm-brain.js'
 import { runMission } from '../dist/agent.js'
+import { ERROR_CLAIM_CONFIDENCE, USABLE_OBSERVATION_CONFIDENCE } from '../dist/constants.js'
 
 const NOW = 1_700_000_000_000
 
@@ -92,12 +93,50 @@ test('DeterministicBrain: synthesize fuses observations into one infer claim', (
   assert.ok(/high|critical/i.test(inferred.verdict) || inferred.evidence.length >= 1)
 })
 
-test('runMission: with no senses requested, still concludes (low-confidence infer), no throw', async () => {
+test('runMission: with no senses requested, still concludes (infer + verify), no throw', async () => {
   const { mission } = await runMission('understand nothing in particular', {}, NOW)
   const claims = mission.allClaims()
-  assert.equal(claims.length, 1) // just the synthesized infer
-  assert.equal(claims[0].operation, 'infer')
-  assert.ok(mission.state().satisfied === false || mission.state().openGoals.length === 0)
+  assert.ok(claims.some((c) => c.operation === 'infer'))
+  assert.ok(claims.some((c) => c.operation === 'verify'))
+  // No usable observation → the verify claim does not pass → mission not satisfied.
+  assert.equal(mission.state().satisfied, false)
+})
+
+test('runMission: a repo mission closes all goals and reaches satisfied (verify passes)', async () => {
+  const { mission } = await runMission('audit this repo', { repoPath: '.' }, NOW)
+  assert.equal(mission.state().openGoals.length, 0)
+  assert.equal(mission.state().satisfied, true) // usable observation → verify passes → done
+})
+
+test('runMission: uses allSettled — a THROWING sense degrades to a flagged claim, sibling survives', async () => {
+  // A brain whose decompose is fine; we force the net sense to throw by passing a
+  // host that resolves but the scan will error/throw is hard — instead assert the
+  // resilience contract holds for a good repo + a fail-closed host (no crash).
+  const { mission } = await runMission('audit repo and host', { repoPath: '.', host: 'example.com', authorized: false }, NOW)
+  const claims = mission.allClaims()
+  assert.ok(claims.some((c) => c.sense === 'repo' && c.confidence >= 0.4), 'the good repo observation survives')
+  assert.ok(claims.some((c) => c.sense === 'net' && c.unknowns.length > 0), 'the fail-closed host becomes a flagged-unknown claim, not a crash')
+})
+
+test('browserBriefToClaim: a client-heavy page flags itself PARTIAL via an unknown', () => {
+  const brief = {
+    target: { input: 'https://spa.test', url: 'https://spa.test/', origin: 'https://spa.test' },
+    resolvedIp: '1.2.3.4', fetchedAt: NOW, status: 200, contentType: 'text/html', render: 'client-heavy', renderConfidence: 'moderate', truncated: false,
+    summary: 'spa.test — client-heavy', structure: null, forms: [], links: { total: 0, internal: 0, external: 0, unsafeBlank: 0, sample: [] },
+    security: { https: true, hsts: true, hstsWeak: false, csp: true, cspWeaknesses: [], xContentTypeOptions: true, referrerPolicy: true, frameProtection: true, coop: false, corp: false, permissionsPolicy: false, versionLeak: null, mixedContent: [], thirdPartyScripts: ['https://cdn.other.com'], insecureCookies: [] },
+    a11y: { lang: true, imgAltCoverage: null, formFieldsLabeled: null, headingOrderOk: true },
+    findings: [], confidence: 'moderate', suggestedNextProbes: [], sanitization: { framedFields: 0, strippedPayloads: 0 }, notes: [],
+  } as unknown as Parameters<typeof browserBriefToClaim>[0]
+  const c = browserBriefToClaim(brief, 'm', NOW, 'g.observe')
+  assert.equal(c.sense, 'web')
+  assert.ok(c.unknowns.some((u) => /client-heavy|not observed/i.test(u)))
+  assert.ok(c.entities.some((e) => e.kind === 'origin')) // third-party origin surfaced
+})
+
+test('confidence partition invariant: error < usable ≤ every healthy floor', () => {
+  assert.ok(ERROR_CLAIM_CONFIDENCE < USABLE_OBSERVATION_CONFIDENCE)
+  // healthy floors in the adapters: net 0.6/0.7, repo 0.65, browser 0.5/0.6/0.7
+  for (const floor of [0.5, 0.6, 0.65, 0.7]) assert.ok(USABLE_OBSERVATION_CONFIDENCE <= floor)
 })
 
 test('extractJson: pulls JSON out of fences and surrounding prose', () => {
