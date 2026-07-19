@@ -127,13 +127,12 @@ export async function runMission(intent: string, input: MissionInput, now: numbe
   // dead code. Acting is still consent-gated: the default dispatch only re-reads.
   const dispatch = input.dispatch ?? ((probe, ctx) => defaultDispatch(probe, ctx))
   const maxRounds = Math.max(0, input.maxRounds ?? 2)
-  const acted = new Set<string>()
   for (let round = 0; round < maxRounds; round++) {
     const probe = brain.pickNext(mission.state())
     if (!probe) break
-    const key = `${probe.sense}:${probe.description}`
-    if (acted.has(key)) break // don't loop on the same probe
-    acted.add(key)
+    // Mark it executed in the mission graph itself, so the planner (bestNextProbe)
+    // never re-proposes it — the loop can't spin on the same probe.
+    mission.markProbeExecuted(probe)
     log(`probe (round ${round + 1}): [${probe.sense}] ${probe.description}`)
     let claim: CognitiveClaim | null = null
     try {

@@ -1,8 +1,17 @@
 import { newClaim, type CognitiveClaim, type Entity, type Evidence, type NextProbe } from '@dir-ai/voyager-contract'
+import { stripInjection } from '@dir-ai/voyager'
 import type { NetBrief } from '@dir-ai/voyager-net'
 import type { OrientationBrief } from '@dir-ai/voyager-repo'
 import type { PageBrief } from '@dir-ai/voyager-browser'
 import { ERROR_CLAIM_CONFIDENCE } from './constants.js'
+
+/** framed:true must be EARNED, not asserted. The senses already strip their
+ *  target-controlled text, but the orchestrator re-strips here so a claim marked
+ *  `framed` has actually been neutralized by THIS layer too — defense in depth,
+ *  no "framed of convenience". */
+function framedEvidence(what: string, at: string | undefined, source: string, capabilityId: string, now: number): Evidence {
+  return { what: stripInjection(what).slice(0, 500), at: at ? stripInjection(at).slice(0, 200) : at, framed: true, provenance: { source, capabilityId, fetchedAt: now } }
+}
 
 const sevToConfidence: Record<string, number> = { critical: 0.95, high: 0.9, medium: 0.75, low: 0.6, info: 0.5 }
 
@@ -19,7 +28,7 @@ export function netBriefToClaim(brief: NetBrief, missionId: string, now: number,
     entities.push({ id: `net:port:${host}:${p.port}`, sense: 'net', kind: 'port', label: `${p.port}${p.service ? `/${p.service}` : ''}` })
     if (p.product) entities.push({ id: `net:service:${p.product}${p.version ? `@${p.version}` : ''}`, sense: 'net', kind: 'service', label: `${p.product} ${p.version ?? ''}`.trim() })
   }
-  for (const f of brief.findings) evidence.push({ what: `[${f.severity}] ${f.kind}: ${f.detail}`, at: f.at, framed: true, provenance: { source: 'voyager-net', capabilityId: 'net.scan', fetchedAt: now } })
+  for (const f of brief.findings) evidence.push(framedEvidence(`[${f.severity}] ${f.kind}: ${f.detail}`, f.at, 'voyager-net', 'net.scan', now))
 
   const worst = brief.findings.reduce((m, f) => Math.max(m, sevToConfidence[f.severity] ?? 0), 0)
   const nextProbes: NextProbe[] = brief.suggestedNextProbes.map((s) => ({ sense: 'net', description: s, expectedInformationGain: 0.4, cost: 3 }))
@@ -42,7 +51,7 @@ export function repoBriefToClaim(brief: OrientationBrief, missionId: string, now
   const name = brief.manifest?.name ?? brief.target.resolvedPath ?? 'repo'
   const entities: Entity[] = [{ id: `repo:project:${name}`, sense: 'repo', kind: 'project', label: name }]
   for (const e of brief.structure?.entrypoints ?? []) entities.push({ id: `repo:file:${e}`, sense: 'repo', kind: 'file', label: e })
-  const evidence: Evidence[] = brief.risks.map((r) => ({ what: `[${r.level}] ${r.kind}: ${r.detail}`, at: r.path, framed: true, provenance: { source: 'voyager-repo', capabilityId: 'repo.scout', fetchedAt: now } }))
+  const evidence: Evidence[] = brief.risks.map((r) => framedEvidence(`[${r.level}] ${r.kind}: ${r.detail}`, r.path, 'voyager-repo', 'repo.scout', now))
 
   const rejectedDeps = brief.dependencies.findings.filter((d) => d.verdict === 'rejected')
   for (const d of rejectedDeps) entities.push({ id: `repo:dep:${d.name}`, sense: 'repo', kind: 'dep', label: d.name })
@@ -72,7 +81,7 @@ export function browserBriefToClaim(brief: PageBrief, missionId: string, now: nu
   for (const o of brief.security?.thirdPartyScripts ?? []) entities.push({ id: `web:origin:${o}`, sense: 'web', kind: 'origin', label: o })
   for (const f of brief.forms.filter((x) => x.sensitive)) entities.push({ id: `web:form:${f.action}`, sense: 'web', kind: 'form', label: f.action })
 
-  const evidence: Evidence[] = brief.findings.map((f) => ({ what: `[${f.severity}] ${f.kind}: ${f.detail}`, at: f.at, framed: true, provenance: { source: 'voyager-browser', capabilityId: 'browser.observe', fetchedAt: now } }))
+  const evidence: Evidence[] = brief.findings.map((f) => framedEvidence(`[${f.severity}] ${f.kind}: ${f.detail}`, f.at, 'voyager-browser', 'browser.observe', now))
   const worst = brief.findings.reduce((m, f) => Math.max(m, sevToConfidence[f.severity] ?? 0), 0)
 
   const unknowns: string[] = []

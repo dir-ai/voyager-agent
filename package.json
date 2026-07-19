@@ -1,6 +1,6 @@
 {
   "name": "@dir-ai/voyager-agent",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "The one universal Voyager: a thin, model-independent orchestrator that turns modular senses (net, repo, …) into CognitiveClaims, runs a live mission, links evidence into causal chains, and acts only through consent. Composition, not a monolith.",
   "type": "module",
   "license": "MIT",
@@ -49,11 +49,12 @@
     "test": "npm run build && tsc -p tsconfig.test.json && node --test scripts/run-tests.mjs"
   },
   "dependencies": {
-    "@dir-ai/voyager-contract": "^0.2.0",
-    "@dir-ai/voyager-net": "^0.3.0",
-    "@dir-ai/voyager-repo": "^0.1.0",
+    "@dir-ai/voyager-contract": "^0.2.1",
+    "@dir-ai/voyager-net": "^0.3.1",
+    "@dir-ai/voyager-repo": "^0.2.1",
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "@dir-ai/voyager-browser": "^0.2.0"
+    "@dir-ai/voyager-browser": "^0.2.1",
+    "@dir-ai/voyager": "^1.2.1"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
