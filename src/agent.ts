@@ -16,6 +16,11 @@ export interface MissionInput {
   url?: string
   /** REQUIRED to actually scan the host (voyager-net's fail-closed gate). */
   authorized?: boolean
+  /** Ports for the net scan — open the sense wider than the default sweep (Kimi A3).
+   *  e.g. a top-1000 or a custom list. Passed straight through to voyager-net. */
+  ports?: number[]
+  /** Per-probe timeout (ms) for the net sense. */
+  timeoutMs?: number
   /** Verify up to N dependencies via Voyager during the repo scout. */
   checkDeps?: number
   /** The reasoning model. Defaults to a rule-based brain so it runs with no LLM. */
@@ -75,10 +80,10 @@ export async function capabilityDispatch(probe: NextProbe, ctx: ProbeContext): P
     return repoBriefToClaim(brief, missionId, now)
   }
   if (probe.sense === 'web') {
-    // Explicit URL always allowed; a derived URL only for the host the caller
-    // authorized (ownership asserted) and only if we haven't observed it already.
-    const derived = input.host && input.authorized ? `https://${input.host}/` : null
-    const url = input.url ?? derived
+    // Explicit URL always allowed; else derive from the REAL HTTP ports the net
+    // sense discovered (Kimi A4) — not a blind https://host/. Only for the host the
+    // caller authorized, and only once.
+    const url = input.url ?? deriveWebTarget(ctx.mission, input)
     const already = ctx.mission.allClaims().some((c) => c.sense === 'web' && c.operation === 'observe')
     if (url && !already) {
       const brief = await observe(url)
@@ -86,6 +91,31 @@ export async function capabilityDispatch(probe: NextProbe, ctx: ProbeContext): P
     }
   }
   return null
+}
+
+/** Pick a web URL to observe from the host's discovered HTTP ports. Prefers a real
+ *  open HTTP(S) port the net sense already found (e.g. :3000, :8080) over a blind
+ *  guess; only for an authorized host. Falls back to https://host/ if net saw no
+ *  obvious web port. Never targets a host other than the one the caller owns. */
+function deriveWebTarget(mission: MissionGraph, input: MissionInput): string | null {
+  if (!input.host || !input.authorized) return null
+  const HTTP_PORTS = new Set([80, 443, 8080, 8443, 3000, 8000, 5000, 8888])
+  const found: Array<{ port: number; tls: boolean }> = []
+  for (const e of mission.entities()) {
+    if (e.kind !== 'port') continue
+    const m = /^net:port:.+:(\d+)$/.exec(e.id)
+    if (!m) continue
+    const port = Number(m[1])
+    const label = (e.label ?? '').toLowerCase()
+    if (!(HTTP_PORTS.has(port) || /http/.test(label))) continue
+    found.push({ port, tls: port === 443 || port === 8443 || /https|tls|ssl/.test(label) })
+  }
+  if (!found.length) return `https://${input.host}/`
+  found.sort((a, b) => Number(b.tls) - Number(a.tls) || a.port - b.port)
+  const best = found[0]
+  const scheme = best.tls ? 'https' : 'http'
+  const bare = (scheme === 'http' && best.port === 80) || (scheme === 'https' && best.port === 443)
+  return `${scheme}://${input.host}${bare ? '' : `:${best.port}`}/`
 }
 
 /**
@@ -122,7 +152,7 @@ export async function runMission(intent: string, input: MissionInput, now: numbe
   }
   if (input.host) {
     jobs.push(
-      senseJob('net', 'net.scan', async () => netBriefToClaim(await scan(input.host!, { authorized: input.authorized }), mission.id, now, observeGoalId), now, mission.id, observeGoalId).then((claim) => {
+      senseJob('net', 'net.scan', async () => netBriefToClaim(await scan(input.host!, { authorized: input.authorized, ports: input.ports, timeoutMs: input.timeoutMs }), mission.id, now, observeGoalId), now, mission.id, observeGoalId).then((claim) => {
         log(`net sense: audited ${input.host}`)
         return { claim, capability: 'net.scan' }
       }),
@@ -154,26 +184,30 @@ export async function runMission(intent: string, input: MissionInput, now: numbe
   // dead code. Acting is still consent-gated: the default dispatch only re-reads.
   const dispatch = input.dispatch ?? ((probe, ctx) => capabilityDispatch(probe, ctx))
   const maxRounds = Math.max(0, input.maxRounds ?? 2)
-  for (let round = 0; round < maxRounds; round++) {
-    // The model ROUTES when it can: pool every candidate probe the senses
-    // suggested and let pickNextAsync choose by learned capability utility.
-    // A rule-based brain (no pickNextAsync) still uses the planner's bestNextProbe.
+  // A non-dispatchable probe must NOT kill the whole loop — it just gets skipped so
+  // the next-best candidate still gets its turn (Kimi A1). We track what we've
+  // tried so the loop always makes progress and terminates when nothing new remains.
+  const tried = new Set<string>()
+  const probeKey = (p: NextProbe): string => `${p.sense}|${p.capability ?? ''}|${p.description}`
+  let round = 0
+  while (round < maxRounds) {
     const state = mission.state()
-    const probe = brain.pickNextAsync
-      ? await brain.pickNextAsync(state, cg, dedupeProbes(mission.allClaims().flatMap((c) => c.suggestedNextProbes)))
-      : brain.pickNext(state)
-    if (!probe) break
-    // Mark it executed in the mission graph itself, so the planner (bestNextProbe)
-    // never re-proposes it — the loop can't spin on the same probe.
+    const candidates = dedupeProbes(mission.allClaims().flatMap((c) => c.suggestedNextProbes)).filter((p) => !tried.has(probeKey(p)))
+    // The model ROUTES when it can: it chooses among the fresh candidates by learned
+    // capability utility. A rule-based brain uses the planner's bestNextProbe.
+    const probe = brain.pickNextAsync ? await brain.pickNextAsync(state, cg, candidates) : brain.pickNext(state)
+    if (!probe || tried.has(probeKey(probe))) break // nothing new left to try → done
+    tried.add(probeKey(probe))
     mission.markProbeExecuted(probe)
-    log(`probe (round ${round + 1}): [${probe.sense}] ${probe.description}`)
+    round++
+    log(`probe (round ${round}): [${probe.sense}] ${probe.description}`)
     let claim: CognitiveClaim | null = null
     try {
       claim = await dispatch(probe, { intent, input, missionId: mission.id, now, mission })
     } catch {
       claim = null
     }
-    if (!claim) break // not dispatchable → stop iterating (recommendation stands)
+    if (!claim) continue // not dispatchable RIGHT NOW → skip it, keep exploring the rest
     mission.addClaim(claim)
     cg.recordOutcome(`${probe.sense}.probe`, claim.confidence >= USABLE_OBSERVATION_CONFIDENCE)
   }

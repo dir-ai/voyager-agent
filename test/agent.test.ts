@@ -226,14 +226,20 @@ test('iterative loop: runs bounded rounds via an injected dispatch, then conclud
   assert.ok(mission.allClaims().some((c) => c.operation === 'verify'))
 })
 
-test('iterative loop: stops immediately when a probe is not dispatchable (null)', async () => {
-  let calls = 0
-  const dispatch = async () => {
-    calls++
-    return null
+test('iterative loop (A1): a non-dispatchable probe is SKIPPED, not fatal — the loop keeps exploring', async () => {
+  const base = new DeterministicBrain()
+  let pk = 0
+  // A brain that always offers a FRESH probe, so the only thing that could end the
+  // loop early is the (old, buggy) break-on-null. With the A1 fix it runs all rounds.
+  const brain = {
+    decompose: base.decompose.bind(base),
+    synthesize: base.synthesize.bind(base),
+    pickNext: () => ({ sense: 'repo' as const, description: `p${pk++}`, expectedInformationGain: 1 }),
   }
-  await runMission('probe once', { repoPath: '.', maxRounds: 5, dispatch: dispatch as never }, NOW)
-  assert.equal(calls, 1, 'a non-dispatchable probe stops the loop after one attempt')
+  let calls = 0
+  const dispatch = async () => { calls++; return null } // never dispatchable
+  await runMission('probe iteratively', { repoPath: '.', maxRounds: 5, brain: brain as never, dispatch: dispatch as never }, NOW)
+  assert.equal(calls, 5, 'null dispatch skips each probe but the loop runs all rounds instead of dying at 1')
 })
 
 test('iterative loop: maxRounds 0 disables iteration entirely', async () => {

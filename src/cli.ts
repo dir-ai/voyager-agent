@@ -6,6 +6,24 @@
 import { runMission } from './agent.js'
 import { VERSION } from './version.js'
 
+/** Parse a --ports value: "80,443,6379", a range "1-1024", or "top1000". */
+function parsePorts(spec: string): number[] | undefined {
+  const s = spec.trim().toLowerCase()
+  if (s === 'top1000') return Array.from({ length: 1000 }, (_, i) => i + 1)
+  const out = new Set<number>()
+  for (const part of s.split(',')) {
+    const range = /^(\d+)-(\d+)$/.exec(part.trim())
+    if (range) {
+      const [a, b] = [Number(range[1]), Number(range[2])]
+      for (let p = Math.max(1, a); p <= Math.min(65535, b); p++) out.add(p)
+    } else {
+      const p = Number(part.trim())
+      if (Number.isInteger(p) && p > 0 && p < 65536) out.add(p)
+    }
+  }
+  return out.size ? [...out] : undefined
+}
+
 function parseArgs(argv: string[]): { flags: Record<string, string | boolean>; positionals: string[] } {
   const boolean = new Set(['json', 'authorized'])
   const flags: Record<string, string | boolean> = {}
@@ -66,6 +84,9 @@ async function main(): Promise<number> {
     if (flags[k] === true) { console.error(`\x1b[33mwarning:\x1b[0m --${k} needs a value (e.g. --${k} <value>) — ignoring it`); }
   }
   const checkDepsRaw = typeof flags['check-deps'] === 'string' ? Number(flags['check-deps']) || 0 : 0
+  const ports = typeof flags.ports === 'string' ? parsePorts(flags.ports) : undefined
+  const maxRoundsRaw = typeof flags['max-rounds'] === 'string' ? Number(flags['max-rounds']) : NaN
+  const timeoutRaw = typeof flags.timeout === 'string' ? Number(flags.timeout) : NaN
   const { mission, capabilities } = await runMission(
     intent,
     {
@@ -74,6 +95,9 @@ async function main(): Promise<number> {
       url: typeof flags.url === 'string' ? flags.url : undefined,
       authorized: flags.authorized === true,
       checkDeps: Math.min(50, Math.max(0, checkDepsRaw)), // cap matches the MCP schema
+      ports, // open the net sense wider (Kimi A3): --ports "1-1000" or "80,443,6379"
+      maxRounds: Number.isFinite(maxRoundsRaw) ? Math.min(10, Math.max(0, maxRoundsRaw)) : undefined,
+      timeoutMs: Number.isFinite(timeoutRaw) ? Math.min(15_000, Math.max(500, timeoutRaw)) : undefined,
       onLog: (l) => { if (!json) console.error(`  · ${l}`) },
     },
     Date.now(),
