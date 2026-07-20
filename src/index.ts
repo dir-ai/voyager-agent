@@ -12,6 +12,11 @@ export { LlmBrain, type Complete, type ChatMessage, type LlmBrainOptions, extrac
 export { ProgrexBrain, progrexComplete, type ProgrexBrainOptions, PROGREX_DEFAULT_MODEL } from './progrex.js'
 export { netBriefToClaim, repoBriefToClaim, browserBriefToClaim } from './adapters.js'
 export { proposeRemediations } from './remediation.js'
+export {
+  runActiveVerification, deriveVerifyTargets, webProbeTargetsFromBrief,
+  type ActiveVerifier, type VerifyTarget, type VerifyConsent, type VerifyContext,
+  type VerifiedFinding, type VerificationCoverage, type VerificationInput,
+} from './verify.js'
 export { correlate } from './correlate.js'
 export { diffBaseline, saveBaseline, driftClaim, fingerprints, missionKey, type BaselineDiff } from './baseline.js'
 export { missionReport, verifyReport, type MissionReport, type SignOptions, type VerifyResult } from './report.js'

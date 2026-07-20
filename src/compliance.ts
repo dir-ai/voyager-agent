@@ -68,6 +68,12 @@ const MAP: Record<string, Controls> = {
   'form-insecure': { owasp: 'A02:2021 Cryptographic Failures', nist: 'SC-8' },
   'mixed-content': { owasp: 'A02:2021 Cryptographic Failures', nist: 'SC-8' },
   'exposed-endpoint': { cis: 'CIS 4.1', owasp: 'A01:2021 Broken Access Control', nist: 'AC-3' },
+  // ── active verification / DEMONSTRATED (from an injected verifier) ────────────
+  // These describe a PROVEN finding-class; the mapping is by vuln class so a
+  // demonstrated SQLi/XSS cites the same controls a static one would.
+  'exploit-verified': { cis: 'CIS 16.11', owasp: 'A03:2021 Injection', nist: 'SI-10' },
+  'sqli': { cis: 'CIS 16.11', owasp: 'A03:2021 Injection', nist: 'SI-10' },
+  'xss': { cis: 'CIS 16.11', owasp: 'A03:2021 Injection', nist: 'SI-10' },
 }
 
 /** Controls a finding kind maps to, or null if unmapped. */

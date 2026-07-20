@@ -2,7 +2,9 @@ import { CapabilityGraph, MissionGraph, newClaim, seedFamilyCapabilities, type C
 import { scan } from '@dir-ai/voyager-net'
 import { scout } from '@dir-ai/voyager-repo'
 import { observe } from '@dir-ai/voyager-browser'
+import type { PageBrief } from '@dir-ai/voyager-browser'
 import { browserBriefToClaim, netBriefToClaim, repoBriefToClaim } from './adapters.js'
+import { runActiveVerification, type ActiveVerifier, type VerifyConsent, type VerifyTarget } from './verify.js'
 import { proposeRemediations } from './remediation.js'
 import { correlate } from './correlate.js'
 import { diffBaseline, saveBaseline, driftClaim, missionKey } from './baseline.js'
@@ -48,6 +50,24 @@ export interface MissionInput {
   /** Propose consent-gated (withheld) remediations for remediable findings via the
    *  HANDS. Default true; the proposals are always withheld, never applied. */
   remediate?: boolean
+  /** ACTIVE VERIFICATION SEAM (mirrors `brain`). An INJECTED offensive engine that
+   *  turns a suspected web vuln the read-only browser sense discovered into a
+   *  DEMONSTRATED `exploit-verified` finding. UNDEFINED in the public package —
+   *  this package ships zero offensive code. It is called ONLY when
+   *  `authorized === true` AND consent is provided AND a verifier is injected;
+   *  otherwise the mission records a plan-only "verification available" claim and
+   *  sends nothing. Fail-closed. */
+  verify?: ActiveVerifier
+  /** A single explicit consent decision for active verification, bound (via the
+   *  engine's run digest) to the target it authorizes. Required (with `verify`) for
+   *  any active probe to fire. */
+  consent?: VerifyConsent
+  /** A per-target consent resolver — returns the decision granted for THAT target
+   *  (bound to its run digest) or null to withhold it. */
+  verifyConsent?: (target: VerifyTarget) => VerifyConsent | null | Promise<VerifyConsent | null>
+  /** SSRF posture forwarded to the injected verifier: permit the caller's OWN
+   *  private/loopback target (staging). Default false. */
+  allowPrivate?: boolean
   /** Execute a chosen next-probe against a real sense, returning a new claim (or
    *  null to stop iterating). Injected so the reasoning model decides HOW to run a
    *  probe; the safe default only deepens repo dependency-vetting. */
@@ -170,6 +190,9 @@ export async function runMission(intent: string, input: MissionInput, now: numbe
   const hosts = uniq([input.host, ...(input.hosts ?? [])])
   const urls = uniq([input.url, ...(input.urls ?? [])])
 
+  // Raw PageBriefs captured during the browser observe fan-out — the READ-ONLY web
+  // attack surface an injected verifier may (with consent) actively confirm.
+  const webBriefs: PageBrief[] = []
   const jobs: Array<Promise<{ claim: CognitiveClaim; capability: string }>> = []
   for (const repoPath of repoPaths) {
     jobs.push(
@@ -189,7 +212,11 @@ export async function runMission(intent: string, input: MissionInput, now: numbe
   }
   for (const url of urls) {
     jobs.push(
-      senseJob('web', 'browser.observe', async () => browserBriefToClaim(await observe(url, { authorized: input.authorized }), mission.id, now, observeGoalId), now, mission.id, observeGoalId).then((claim) => {
+      senseJob('web', 'browser.observe', async () => {
+        const brief = await observe(url, { authorized: input.authorized })
+        webBriefs.push(brief) // retained for the (consent-gated) active-verification phase
+        return browserBriefToClaim(brief, mission.id, now, observeGoalId)
+      }, now, mission.id, observeGoalId).then((claim) => {
         log(`browser sense: observed ${url}`)
         return { claim, capability: 'browser.observe' }
       }),
@@ -302,6 +329,23 @@ export async function runMission(intent: string, input: MissionInput, now: numbe
   const goalStatus = fullCoverage ? 'satisfied' : partialCoverage || requestedSenses.length === 0 ? 'partial' : 'failed'
   for (const g of goals) mission.setGoalStatus(g.id, goalStatus)
   if (goalStatus !== 'satisfied') log(`verification: mission ${goalStatus} — ${method}`)
+
+  // ── Active verification (INJECTED, consent-gated): turn a suspected web vuln the
+  // read-only browser sense discovered into a DEMONSTRATED `exploit-verified`
+  // finding — but ONLY through an injected offensive engine, only when authorized
+  // AND consented. With no verifier injected (the public default) this records at
+  // most a plan-only "verification available" note and sends nothing. Zero
+  // offensive code lives in this package; the engine is supplied by the caller.
+  const verifyClaims = await runActiveVerification(
+    webBriefs,
+    { verify: input.verify, consent: input.consent, verifyConsent: input.verifyConsent, authorized: input.authorized, allowPrivate: input.allowPrivate, onLog: log },
+    mission.allClaims(),
+    mission.id,
+    now,
+    concludeGoalId,
+  )
+  for (const c of verifyClaims) mission.addClaim(c)
+
   // ── Propose remediation (the HANDS): remediable findings → consent-gated `act`
   // claims, always WITHHELD. The agent never applies — it plans a reversible fix
   // and hands the mission a pendingAction. Sensing autonomous; acting gated.

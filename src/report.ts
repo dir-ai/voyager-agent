@@ -1,7 +1,36 @@
 import { createHash, generateKeyPairSync, sign as edSign, verify as edVerify, createPublicKey, createPrivateKey, type KeyObject } from 'node:crypto'
 import type { MissionGraph } from '@dir-ai/voyager-contract'
+import { stripInjection } from '@dir-ai/voyager'
 import { VERSION } from './version.js'
 import { complianceFor, controlTags } from './compliance.js'
+
+/**
+ * P0 (Kimi, verified live): the signed SARIF must NEVER embed target-derived text
+ * raw. A repo file named `evil-<img src=x onerror=alert(1)>.js`, a banner, a URL or
+ * a param flows through a claim verdict/evidence into `message.text` — and the
+ * ed25519 signature would then AUTHENTICATE hostile, renderable markup. Every string
+ * that enters the report passes through `san`: the family sanitizer `stripInjection`
+ * (neutralizes prompt-injection phrasing) FOLLOWED BY HTML-neutralization (so a
+ * viewer that renders message.text as HTML cannot execute injected markup). `deepSan`
+ * applies it to every string in a nested structure (the coverage object). Nothing
+ * target-derived reaches the signed bytes un-neutralized.
+ */
+function htmlInert(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+}
+function san(s: unknown): string {
+  return htmlInert(stripInjection(String(s ?? '')))
+}
+function deepSan<T>(v: T): T {
+  if (typeof v === 'string') return san(v) as unknown as T
+  if (Array.isArray(v)) return v.map((x) => deepSan(x)) as unknown as T
+  if (v && typeof v === 'object') {
+    const o: Record<string, unknown> = {}
+    for (const [k, val] of Object.entries(v)) o[k] = deepSan(val)
+    return o as unknown as T
+  }
+  return v
+}
 
 /**
  * The client-grade artifact — a SARIF 2.1.0 report + a signature. Kimi's operative
@@ -11,7 +40,7 @@ import { complianceFor, controlTags } from './compliance.js'
  * tested, what was NOT) + a SHA-256 signature over the canonical report — the receipt
  * that says "tested against N controls on day X with outcome Y", never "impenetrable".
  */
-const LEVEL: Record<string, 'error' | 'warning' | 'note'> = { critical: 'error', high: 'error', medium: 'warning', low: 'note', info: 'note' }
+const LEVEL: Record<string, 'error' | 'warning' | 'note'> = { critical: 'error', high: 'error', medium: 'warning', low: 'note', info: 'note', demonstrated: 'error' }
 
 export interface MissionReport {
   sarif: unknown
@@ -45,21 +74,66 @@ export function missionReport(mission: MissionGraph, opts: { now: number; target
       const sev = (m?.[1] ?? 'info').toLowerCase()
       const kind = m?.[2] ?? 'finding'
       const detail = (m?.[3] ?? e.what).trim()
-      ruleIds.add(`${c.sense}/${kind}`)
+      // Tags are looked up on the RAW (regex-constrained) kind; the ruleId embedded
+      // in the doc is sanitized. Everything target-derived (detail, at) is sanitized.
       const tags = controlTags(complianceFor(kind))
+      const ruleId = san(`${c.sense}/${kind}`)
+      ruleIds.add(ruleId)
       results.push({
-        ruleId: `${c.sense}/${kind}`,
+        ruleId,
         level: LEVEL[sev] ?? 'note',
-        message: { text: detail.slice(0, 1000) },
-        locations: e.at ? [{ physicalLocation: { artifactLocation: { uri: String(e.at).slice(0, 400) } } }] : [],
+        message: { text: san(detail).slice(0, 1000) },
+        locations: e.at ? [{ physicalLocation: { artifactLocation: { uri: san(e.at).slice(0, 400) } } }] : [],
         // Compliance controls as SARIF tags — the CIS/OWASP/NIST vocabulary a CISO reports against.
-        properties: { sense: c.sense, severity: sev, confidence: c.confidence, tags },
+        properties: { sense: san(c.sense), severity: sev, confidence: c.confidence, tags },
       })
     }
   }
+  // ── exploit-verified: DEMONSTRATED findings from an injected active verifier.
+  // A distinct finding-kind (rule `<sense>/exploit-verified`) at DEMONSTRATED
+  // severity → SARIF level 'error', flagged `demonstrated:true` so it is never
+  // confused with a statically-observed finding. The engine is injected; this
+  // package only ADAPTS its confirmed results — it performs no exploitation.
+  for (const c of mission.allClaims()) {
+    if (c.capability !== 'verify.active' || c.operation !== 'verify' || c.verification?.passed !== true) continue
+    // The lead evidence is `[demonstrated] <vulnKind>: <detail>`; any others are
+    // reproducible sub-evidence (differential / marker / DB signature / receipt).
+    const lead = c.evidence[0]
+    const m = lead ? /^\[(\w+)\]\s*([a-z0-9-]+)\s*:\s*([\s\S]*)$/i.exec(lead.what) : null
+    const vulnKindRaw = m?.[2] ?? ((c.continuationState?.vulnKind as string) ?? 'exploit')
+    const detail = (m?.[3] ?? c.verdict).trim()
+    const ruleId = san(`${c.sense}/exploit-verified`)
+    ruleIds.add(ruleId)
+    // Control lookup on the RAW vuln class; the value embedded in the doc is sanitized.
+    const tags = controlTags(complianceFor(vulnKindRaw) ?? complianceFor('exploit-verified'))
+    const receipt = (c.continuationState?.attestation as { receipt?: string } | null)?.receipt ?? null
+    results.push({
+      ruleId,
+      level: 'error',
+      message: { text: san(detail).slice(0, 1000) },
+      locations: lead?.at ? [{ physicalLocation: { artifactLocation: { uri: san(lead.at).slice(0, 400) } } }] : [],
+      properties: {
+        sense: san(c.sense), severity: 'demonstrated', demonstrated: true, vulnKind: san(vulnKindRaw), confidence: c.confidence, tags,
+        attestation: receipt ? san(receipt) : null, method: c.verification?.method ? san(c.verification.method) : null,
+        evidence: c.evidence.slice(1).map((e) => san(e.what).slice(0, 300)),
+      },
+    })
+  }
+
+  // ── Coverage: the honest scope statement — what was ACTIVELY tested vs only
+  // OBSERVED. Kimi's sharpest point: authenticity must not outrun the measured
+  // perimeter, so the signed artifact declares its own scope. Read from the
+  // active-verification coverage claim (if any).
+  const covClaim = mission.allClaims().find((x) => x.capability === 'verify.coverage' && x.operation === 'verify')
+  // The coverage object carries target-derived strings (URLs/params) — deep-sanitize
+  // every string before it enters the signed doc.
+  const activeCoverage = covClaim?.continuationState?.coverage ? deepSan(covClaim.continuationState.coverage as Record<string, unknown>) : null
+
   // Honest coverage: which senses ran + the mission's own verification verdict.
-  const verify = mission.allClaims().find((x) => x.operation === 'verify')
-  const coverage = verify?.verification?.method ?? 'see mission verification'
+  // The FIRST verify claim is the required-sense coverage; skip the active-verify
+  // coverage claims (they carry the `verify.coverage`/`verify.active` capability).
+  const verify = mission.allClaims().find((x) => x.operation === 'verify' && x.capability !== 'verify.coverage' && x.capability !== 'verify.active')
+  const coverage = san(verify?.verification?.method ?? 'see mission verification')
   const notTested = 'This report attests ONLY the controls Voyager tested (read-only introspection of the declared targets). It does NOT test: credentialed/authenticated access, business logic, 0-days, phishing/social, insider threat, or anything outside the declared scope. Absence of a finding within scope is not a guarantee of security.'
 
   const sarif = {
@@ -69,8 +143,15 @@ export function missionReport(mission: MissionGraph, opts: { now: number; target
       {
         tool: { driver: { name: 'voyager-agent', version: VERSION, informationUri: 'https://github.com/dir-ai/voyager-agent', rules: [...ruleIds].map((id) => ({ id })) } },
         results,
-        invocations: [{ executionSuccessful: true, endTimeUtc: new Date(opts.now).toISOString(), properties: { targets: opts.targets ?? [], coverage, satisfied: state.satisfied } }],
-        properties: { coverageStatement: coverage, scopeDisclaimer: notTested, rootCause: state.rootCause?.cause ?? null },
+        invocations: [{ executionSuccessful: true, endTimeUtc: new Date(opts.now).toISOString(), properties: { targets: (opts.targets ?? []).map((t) => san(t)), coverage, satisfied: state.satisfied } }],
+        properties: {
+          coverageStatement: coverage,
+          scopeDisclaimer: notTested,
+          rootCause: state.rootCause?.cause ? san(state.rootCause.cause) : null,
+          // The active-verification scope: which classes were ACTIVELY tested (and
+          // demonstrated) vs which are OBSERVED ONLY. Absent when no verifier ran.
+          activeVerification: activeCoverage ?? { ran: false, note: 'no active verification — all findings are OBSERVED ONLY (read-only introspection). Inject a consent-gated verifier to actively demonstrate suspected web vulns.' },
+        },
       },
     ],
   }
