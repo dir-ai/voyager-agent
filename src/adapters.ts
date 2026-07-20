@@ -1,4 +1,4 @@
-import { newClaim, type CognitiveClaim, type Entity, type Evidence, type NextProbe } from '@dir-ai/voyager-contract'
+import { newClaim, type CognitiveClaim, type Entity, type Evidence, type NextProbe, type Relationship } from '@dir-ai/voyager-contract'
 import { stripInjection } from '@dir-ai/voyager'
 import type { NetBrief } from '@dir-ai/voyager-net'
 import type { OrientationBrief } from '@dir-ai/voyager-repo'
@@ -57,13 +57,29 @@ export function repoBriefToClaim(brief: OrientationBrief, missionId: string, now
   for (const d of rejectedDeps) entities.push({ id: `repo:dep:${d.name}`, sense: 'repo', kind: 'dep', label: d.name })
   const worstRisk = brief.risks.some((r) => r.level === 'high') || rejectedDeps.length ? 0.85 : brief.risks.length ? 0.7 : 0.65
 
+  // Surface the CODE MAP into the shared entity space — routes, UI components and
+  // services become first-class entities. A route id keyed by its PATH is what lets
+  // a web-sense finding on /api/login later correlate to the repo route that serves
+  // it (the cross-sense causal chain: page → API → route file → service).
+  const relationships: Relationship[] = rejectedDeps.map((d) => ({ from: `repo:project:${name}`, to: `repo:dep:${d.name}`, kind: 'depends-on' as const, confidence: 0.9 }))
+  const cm = brief.codeMap
+  if (cm) {
+    for (const r of cm.routes.slice(0, 40)) {
+      const id = `repo:route:${r.path}`
+      entities.push({ id, sense: 'repo', kind: r.kind === 'page' ? 'page' : 'route', label: `${r.method} ${r.path}` })
+      relationships.push({ from: id, to: `repo:file:${r.file}`, kind: 'implemented-by' as const, confidence: 0.8 })
+    }
+    for (const c of cm.components.slice(0, 40)) entities.push({ id: `repo:component:${c.file}`, sense: 'repo', kind: 'component', label: `${c.name} (${c.kind})` })
+    for (const s of cm.services.slice(0, 20)) entities.push({ id: `repo:service:${s.name}`, sense: 'repo', kind: 'service', label: `${s.name}${s.image ? ` [${s.image}]` : ''}` })
+  }
+
   return newClaim({
     missionId, goalId, sense: 'repo', capability: 'repo.scout', operation: 'observe',
     verdict: brief.summary,
     confidence: worstRisk,
     evidence, entities,
     suggestedNextProbes: brief.suggestedNextProbe.map((s) => ({ sense: 'repo', description: s, expectedInformationGain: 0.35, cost: 2 })),
-    relationships: rejectedDeps.map((d) => ({ from: `repo:project:${name}`, to: `repo:dep:${d.name}`, kind: 'depends-on', confidence: 0.9 })),
+    relationships,
     unknowns: brief.approach.withheld.map((w) => `withheld until consent: ${w}`),
     memoryCandidates: rejectedDeps.map((d) => ({ kind: 'semantic', statement: `${name} depends on ${d.name} which Voyager rejected: ${d.note ?? 'unsafe'}`, scope: name })),
   }, now)
