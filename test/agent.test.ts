@@ -451,15 +451,32 @@ test('compliance: finding kinds map to CIS/OWASP/NIST and appear as SARIF tags',
   assert.ok(sarif.runs[0].results[0].properties.tags.some((t) => /CIS 4\.1/.test(t)), 'SARIF result carries compliance tags')
 })
 
-// Kimi R3-7: a REAL signature (Ed25519) — forging findings + re-signing fails verify.
-test('report: Ed25519 attestation verifies; tampering with a finding breaks verification', () => {
+// Kimi F3: Ed25519 with an OUT-OF-BAND anchor — the key-swap forgery must fail.
+test('report: authenticity requires the anchor key; the F3 key-swap yields authentic:false', async () => {
+  const { generateKeyPairSync, sign: edSign } = await import('node:crypto')
   const m = new MissionGraph('m', 'audit', 'x')
   m.addClaim(newClaim({ missionId: 'm', sense: 'net', operation: 'observe', verdict: 'x', confidence: 0.9, evidence: [{ what: '[critical] unauthenticated-service: Redis', at: 'h:6379' }] }, NOW))
   const rep = missionReport(m, { now: NOW })
-  const sarif = rep.sarif as { runs: Array<{ results: Array<{ message: { text: string } }>; properties: { attestation: { alg: string } } }> }
+  const anchor = rep.publicKey // published out of band
+  const sarif = rep.sarif as { runs: Array<{ results: Array<{ message: { text: string } }>; properties: { attestation: { alg: string; publicKey: string; signature: string } } }> }
   assert.equal(sarif.runs[0].properties.attestation.alg, 'ed25519')
-  assert.equal(verifyReport(sarif), true, 'the untampered report verifies')
-  // Forge a finding (the R3-7 attack) — WITHOUT the private key, verification must fail.
-  sarif.runs[0].results[0].message.text = 'TAMPERED — no findings here'
-  assert.equal(verifyReport(sarif), false, 'a tampered report no longer verifies')
+  // F1: untampered + correct anchor → authentic.
+  assert.equal(verifyReport(sarif, { anchorPublicKeyPem: anchor }).authentic, true)
+  // F2: tamper without re-signing → not authentic.
+  const t2 = JSON.parse(JSON.stringify(sarif))
+  t2.runs[0].results[0].message.text = 'TAMPERED'
+  assert.equal(verifyReport(t2, { anchorPublicKeyPem: anchor }).authentic, false)
+  // F3 (the kill-shot): forge findings, sign with MY key, embed MY key. Without the
+  // anchor it would look valid (integrity) — but against the anchor it is NOT authentic.
+  const evil = generateKeyPairSync('ed25519')
+  const forged = JSON.parse(JSON.stringify(sarif))
+  forged.runs[0].results = [] // zero findings
+  delete forged.runs[0].properties.attestation
+  const canonical = JSON.stringify(forged)
+  forged.runs[0].properties.attestation = { alg: 'ed25519', signature: edSign(null, Buffer.from(canonical), evil.privateKey).toString('base64'), publicKey: evil.publicKey.export({ type: 'spki', format: 'pem' }).toString() }
+  const v = verifyReport(forged, { anchorPublicKeyPem: anchor })
+  assert.equal(v.integrity, true, 'F3 is internally consistent (signed with the attacker key)')
+  assert.equal(v.authentic, false, 'F3 FAILS against the out-of-band anchor — the key-swap is defeated')
+  // And with NO anchor, authenticity is honestly withheld (never a false "authentic").
+  assert.equal(verifyReport(sarif).authentic, false)
 })
