@@ -37,6 +37,9 @@ export interface ProbeContext {
   input: MissionInput
   missionId: string
   now: number
+  /** The live mission — dispatch can read discovered entities to aim the next
+   *  probe (e.g. an HTTP service the net sense found → a page the browser observes). */
+  mission: MissionGraph
 }
 
 export interface MissionRun {
@@ -53,16 +56,34 @@ function senseJob(sense: CognitiveClaim['sense'], capability: string, run: () =>
   )
 }
 
-/** The safe default probe executor: the ONLY thing the agent will re-run on its
- *  own is a deeper, read-only pass — deepening repo dependency-vetting when a
- *  probe asks for it. Everything else returns null (stop) unless the caller
- *  injects a richer `dispatch`. It never acts, never scans a new host (that needs
- *  authorization), never fetches a new URL without intent. */
-async function defaultDispatch(probe: NextProbe, ctx: ProbeContext): Promise<CognitiveClaim | null> {
-  if (probe.sense === 'repo' && ctx.input.repoPath && /vet|dependenc/i.test(probe.description)) {
-    const deeper = (ctx.input.checkDeps ?? 0) + 10
-    const brief = await scout(ctx.input.repoPath, { checkDeps: deeper })
-    return repoBriefToClaim(brief, ctx.missionId, ctx.now)
+/**
+ * The capability-driven probe executor: it turns the model's routed next-probe
+ * into a REAL cross-sense observation, staying strictly inside the safe envelope.
+ *  - repo → a deeper, read-only dependency-vetting pass.
+ *  - web  → observe a page: the URL the caller gave, or — the net→browser handoff —
+ *           the web surface of the AUTHORIZED host the net sense just scanned. This
+ *           is the correlation start: a host with an open HTTP service becomes a
+ *           page the browser reads.
+ * It never scans a NEW host (authorization is per-host and only the caller's
+ * `host` is authorized), never mutates, never follows a target the caller didn't
+ * own. Anything it can't safely run returns null (the recommendation stands).
+ */
+export async function capabilityDispatch(probe: NextProbe, ctx: ProbeContext): Promise<CognitiveClaim | null> {
+  const { input, missionId, now } = ctx
+  if (probe.sense === 'repo' && input.repoPath && /vet|dependenc|transitive|lockfile|supply/i.test(probe.description)) {
+    const brief = await scout(input.repoPath, { checkDeps: (input.checkDeps ?? 0) + 10 })
+    return repoBriefToClaim(brief, missionId, now)
+  }
+  if (probe.sense === 'web') {
+    // Explicit URL always allowed; a derived URL only for the host the caller
+    // authorized (ownership asserted) and only if we haven't observed it already.
+    const derived = input.host && input.authorized ? `https://${input.host}/` : null
+    const url = input.url ?? derived
+    const already = ctx.mission.allClaims().some((c) => c.sense === 'web' && c.operation === 'observe')
+    if (url && !already) {
+      const brief = await observe(url)
+      return browserBriefToClaim(brief, missionId, now)
+    }
   }
   return null
 }
@@ -123,13 +144,15 @@ export async function runMission(intent: string, input: MissionInput, now: numbe
     mission.addClaim(claim)
     cg.recordOutcome(capability, claim.confidence >= USABLE_OBSERVATION_CONFIDENCE)
   }
-  if (observeGoalId) mission.setGoalStatus(observeGoalId, 'satisfied')
+  // Goal statuses are set at the end from ACTUAL evidence coverage — not
+  // prematurely satisfied here (that was the P0: a mission looked done before we
+  // knew whether every required sense delivered).
 
   // ── Iterate: the LIVE loop. Pick the most informative next probe, execute it,
   // re-plan — bounded, and only while a probe is actually dispatchable. This is
   // what makes it re-plan instead of a one-shot fan-out. `pickNext` is no longer
   // dead code. Acting is still consent-gated: the default dispatch only re-reads.
-  const dispatch = input.dispatch ?? ((probe, ctx) => defaultDispatch(probe, ctx))
+  const dispatch = input.dispatch ?? ((probe, ctx) => capabilityDispatch(probe, ctx))
   const maxRounds = Math.max(0, input.maxRounds ?? 2)
   for (let round = 0; round < maxRounds; round++) {
     // The model ROUTES when it can: pool every candidate probe the senses
@@ -146,7 +169,7 @@ export async function runMission(intent: string, input: MissionInput, now: numbe
     log(`probe (round ${round + 1}): [${probe.sense}] ${probe.description}`)
     let claim: CognitiveClaim | null = null
     try {
-      claim = await dispatch(probe, { intent, input, missionId: mission.id, now })
+      claim = await dispatch(probe, { intent, input, missionId: mission.id, now, mission })
     } catch {
       claim = null
     }
@@ -164,14 +187,50 @@ export async function runMission(intent: string, input: MissionInput, now: numbe
 
   // ── Verify: record that the mission produced a usable conclusion, and close
   // every goal — so mission.state().satisfied means something (not always false).
-  const usable = mission.allClaims().some((c) => c.operation === 'observe' && c.confidence >= USABLE_OBSERVATION_CONFIDENCE)
-  mission.addClaim(
-    newClaim({ missionId: mission.id, goalId: concludeGoalId, sense: 'memory', operation: 'verify', verdict: usable ? 'mission reached a conclusion from usable observations' : 'mission concluded but observations were insufficient', confidence: usable ? 0.8 : 0.3, verification: { passed: usable, method: 'usable-observation check' } }, now),
+  // ── Truthful verification (P0): a mission is only VERIFIED when EVERY sense it
+  // was asked to use produced a usable observation. Partial coverage → the mission
+  // is honestly PARTIAL (not satisfied); a required sense that failed → the
+  // conclusion says so instead of quietly declaring success. This is what stops a
+  // repo+host mission from reading "satisfied" when the host scan was refused.
+  const requestedSenses: CognitiveClaim['sense'][] = []
+  if (input.repoPath) requestedSenses.push('repo')
+  if (input.host) requestedSenses.push('net')
+  if (input.url) requestedSenses.push('web')
+  const usableSenses = new Set(
+    mission.allClaims().filter((c) => c.operation === 'observe' && c.confidence >= USABLE_OBSERVATION_CONFIDENCE).map((c) => c.sense),
   )
-  // Every goal is now accounted for: observed, synthesized, verified. Close them
-  // so mission.state().satisfied reflects a real conclusion (the iterative-loop
-  // refactor left only the observe goal closed).
-  for (const g of goals) mission.setGoalStatus(g.id, 'satisfied')
+  const delivered = requestedSenses.filter((s) => usableSenses.has(s))
+  const missing = requestedSenses.filter((s) => !usableSenses.has(s))
+  const fullCoverage = requestedSenses.length > 0 && missing.length === 0
+  const partialCoverage = delivered.length > 0 && missing.length > 0
+  const method = requestedSenses.length
+    ? `required-sense coverage ${delivered.length}/${requestedSenses.length}${missing.length ? ` — missing: ${missing.join(', ')}` : ''}`
+    : 'no sense requested — nothing to verify'
+  mission.addClaim(
+    newClaim(
+      {
+        missionId: mission.id, goalId: concludeGoalId, sense: 'memory', operation: 'verify',
+        verdict: fullCoverage
+          ? `verified on the full requested evidence (${delivered.join(' + ')})`
+          : partialCoverage
+            ? `PARTIAL — concluded on ${delivered.join(' + ')} only; ${missing.join(', ')} produced no usable evidence`
+            : requestedSenses.length
+              ? `NOT verified — no requested sense produced usable evidence (${missing.join(', ')})`
+              : 'not verified — the mission requested no sense to observe',
+        confidence: fullCoverage ? 0.8 : partialCoverage ? 0.4 : 0.2,
+        unknowns: missing.map((s) => `${s}: required sense produced no usable observation — coverage incomplete`),
+        verification: { passed: fullCoverage, method },
+      },
+      now,
+    ),
+  )
+  // Close goals from ACTUAL coverage: satisfied only on full coverage; partial when
+  // some (or no) senses were asked but not all delivered; failed when a requested
+  // sense delivered nothing at all. mission.state().satisfied requires EVERY goal
+  // satisfied, so partial/failed correctly keep the mission un-satisfied.
+  const goalStatus = fullCoverage ? 'satisfied' : partialCoverage || requestedSenses.length === 0 ? 'partial' : 'failed'
+  for (const g of goals) mission.setGoalStatus(g.id, goalStatus)
+  if (goalStatus !== 'satisfied') log(`verification: mission ${goalStatus} — ${method}`)
   // ── Propose remediation (the HANDS): remediable findings → consent-gated `act`
   // claims, always WITHHELD. The agent never applies — it plans a reversible fix
   // and hands the mission a pendingAction. Sensing autonomous; acting gated.

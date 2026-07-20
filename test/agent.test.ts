@@ -5,7 +5,7 @@ import type { OrientationBrief } from '@dir-ai/voyager-repo'
 import { netBriefToClaim, repoBriefToClaim, browserBriefToClaim } from '../dist/adapters.js'
 import { DeterministicBrain } from '../dist/brain.js'
 import { LlmBrain, extractJson } from '../dist/llm-brain.js'
-import { runMission } from '../dist/agent.js'
+import { runMission, capabilityDispatch } from '../dist/agent.js'
 import { proposeRemediations } from '../dist/remediation.js'
 import { progrexComplete, ProgrexBrain } from '../dist/progrex.js'
 import { CapabilityGraph, seedFamilyCapabilities } from '@dir-ai/voyager-contract'
@@ -269,7 +269,7 @@ test('runMission: the mission surfaces the remediation as a pendingAction, never
 
 // ── Capability-routed pickNext: the MODEL chooses the next organ ─────────────
 function mkState(best: NextProbe | null): MissionState {
-  return { openGoals: [], unknowns: [], contradictions: [], bestNextProbe: best, causalChain: [], rootCause: null, pendingAction: null, satisfied: false }
+  return { openGoals: [], goals: [], unknowns: [], contradictions: [], bestNextProbe: best, causalChain: [], rootCause: null, pendingAction: null, satisfied: false }
 }
 const REPO_PROBE: NextProbe = { sense: 'repo', capability: 'repo.scout', description: 'deepen dependency vetting', expectedInformationGain: 0.3, cost: 5 }
 const NET_PROBE: NextProbe = { sense: 'net', capability: 'net.scan', description: 'scan the host surface', expectedInformationGain: 0.5, cost: 8 }
@@ -323,4 +323,33 @@ test('ProgrexBrain: a model hiccup degrades decompose to the deterministic arc (
   const goals = await brain.decomposeAsync!('audit acme', 'm')
   assert.ok(fellBack, 'the failing model triggers the fallback')
   assert.deepEqual(goals.map((g) => g.id), ['g.observe', 'g.assess', 'g.conclude'])
+})
+
+// ── P0-A: truthful mission verification (no false success) ──────────────────
+test('runMission: a REQUIRED sense that fails makes the mission PARTIAL, not satisfied', async () => {
+  const { mission } = await runMission('audit repo and host', { repoPath: '.', host: 'example.com', authorized: false }, NOW)
+  const s = mission.state()
+  assert.equal(s.satisfied, false, 'a refused required sense must NOT read as satisfied')
+  assert.ok(s.goals.every((g) => g.status === 'partial'), 'goals are partial under incomplete coverage')
+  const verify = mission.allClaims().find((c) => c.operation === 'verify')
+  assert.equal(verify?.verification?.passed, false)
+  assert.match(verify!.verdict, /PARTIAL/)
+  assert.match(verify!.verification!.method, /missing: net/)
+})
+
+// ── capability-driven dispatch (the injected cross-sense executor) ──────────
+test('capabilityDispatch: a repo vet probe deepens dependency vetting; an unmatched probe stops', async () => {
+  const mkCtx = () => ({ intent: 'x', input: { repoPath: '.' }, missionId: 'm', now: NOW, mission: { allClaims: () => [] } as never })
+  const vet = await capabilityDispatch({ sense: 'repo', capability: 'repo.scout', description: 'vet dependencies deeper', expectedInformationGain: 0.3 }, mkCtx())
+  assert.ok(vet && vet.sense === 'repo', 'a vet probe re-runs the repo sense')
+  const none = await capabilityDispatch({ sense: 'repo', capability: 'repo.scout', description: 'something unrelated', expectedInformationGain: 0.1 }, mkCtx())
+  assert.equal(none, null, 'a non-matching probe is not dispatchable → stop')
+})
+
+test('capabilityDispatch: a web probe with no url and no authorized host is NOT dispatchable', async () => {
+  const claim = await capabilityDispatch(
+    { sense: 'web', capability: 'browser.observe', description: 'observe the web surface', expectedInformationGain: 0.4 },
+    { intent: 'x', input: { host: 'example.com', authorized: false }, missionId: 'm', now: NOW, mission: { allClaims: () => [] } as never },
+  )
+  assert.equal(claim, null, 'an UNauthorized host does not get a derived web observation')
 })
