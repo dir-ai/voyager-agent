@@ -29,6 +29,9 @@ export interface MissionInput {
   timeoutMs?: number
   /** Verify up to N dependencies via Voyager during the repo scout. */
   checkDeps?: number
+  /** WRAP external coverage engines (trivy/semgrep) during the repo scout if on PATH,
+   *  adapting their output into framed findings under the gate. Opt-in (slow). */
+  wrapScanners?: boolean
   /** The reasoning model. Defaults to a rule-based brain so it runs with no LLM. */
   brain?: Brain
   /** Max rounds of iterative probing AFTER the initial observe (default 2, 0 = off). */
@@ -82,7 +85,7 @@ function senseJob(sense: CognitiveClaim['sense'], capability: string, run: () =>
 export async function capabilityDispatch(probe: NextProbe, ctx: ProbeContext): Promise<CognitiveClaim | null> {
   const { input, missionId, now } = ctx
   if (probe.sense === 'repo' && input.repoPath && /vet|dependenc|transitive|lockfile|supply/i.test(probe.description)) {
-    const brief = await scout(input.repoPath, { checkDeps: (input.checkDeps ?? 0) + 10 })
+    const brief = await scout(input.repoPath, { checkDeps: (input.checkDeps ?? 0) + 10, wrapScanners: input.wrapScanners })
     return repoBriefToClaim(brief, missionId, now)
   }
   if (probe.sense === 'web') {
@@ -157,7 +160,7 @@ export async function runMission(intent: string, input: MissionInput, now: numbe
   const jobs: Array<Promise<{ claim: CognitiveClaim; capability: string }>> = []
   for (const repoPath of repoPaths) {
     jobs.push(
-      senseJob('repo', 'repo.scout', async () => repoBriefToClaim(await scout(repoPath, { checkDeps: input.checkDeps }), mission.id, now, observeGoalId), now, mission.id, observeGoalId).then((claim) => {
+      senseJob('repo', 'repo.scout', async () => repoBriefToClaim(await scout(repoPath, { checkDeps: input.checkDeps, wrapScanners: input.wrapScanners }), mission.id, now, observeGoalId), now, mission.id, observeGoalId).then((claim) => {
         log(`repo sense: oriented in ${repoPath}`)
         return { claim, capability: 'repo.scout' }
       }),
