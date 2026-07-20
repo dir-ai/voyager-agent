@@ -37,6 +37,10 @@ export interface MissionInput {
    *  persisted. On the next run it reports NEW / RESOLVED / unchanged findings —
    *  "what changed since last time". Off unless set. */
   baselineDir?: string
+  /** HMAC key (from the vault) that SEALS the drift baseline — a hand-rewritten
+   *  baseline fails verification and is refused (fail-closed). Strongly recommended
+   *  whenever baselineDir is set. */
+  baselineKey?: string
   /** The reasoning model. Defaults to a rule-based brain so it runs with no LLM. */
   brain?: Brain
   /** Max rounds of iterative probing AFTER the initial observe (default 2, 0 = off). */
@@ -308,9 +312,9 @@ export async function runMission(intent: string, input: MissionInput, now: numbe
   // RESOLVED / unchanged) — memory across missions, opt-in via baselineDir.
   if (input.baselineDir) {
     const key = missionKey({ repoPaths, hosts, urls })
-    const diff = await diffBaseline(input.baselineDir, key, mission)
+    const diff = await diffBaseline(input.baselineDir, key, mission, input.baselineKey)
     mission.addClaim(driftClaim(diff, mission.id, now, concludeGoalId))
-    await saveBaseline(input.baselineDir, key, mission, now)
+    await saveBaseline(input.baselineDir, key, mission, now, input.baselineKey)
     if (!diff.first) log(`drift: ${diff.added.length} new, ${diff.resolved.length} resolved since last audit`)
   }
 

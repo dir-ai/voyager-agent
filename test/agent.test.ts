@@ -480,3 +480,24 @@ test('report: authenticity requires the anchor key; the F3 key-swap yields authe
   // And with NO anchor, authenticity is honestly withheld (never a false "authentic").
   assert.equal(verifyReport(sarif).authentic, false)
 })
+
+// Kimi round-6 #1: an HMAC-sealed baseline; a hand-rewritten one fails closed.
+test('drift baseline: HMAC seal — a tampered baseline is refused (fail-closed), not trusted', async () => {
+  const { mkdtemp, readFile, writeFile } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = await mkdtemp(join(tmpdir(), 'voyager-hmac-'))
+  const KEY = 'a-vault-secret'; const K = 'tset'
+  const mk = (fs: string[]) => { const m = new MissionGraph('m', 'a', 'x'); m.addClaim(newClaim({ missionId: 'm', sense: 'net', operation: 'observe', verdict: 'h', confidence: 0.8, evidence: fs.map((f) => ({ what: f, at: 'h:1' })) }, NOW)); return m }
+  // Establish a sealed baseline with a critical finding.
+  await saveBaseline(dir, K, mk(['[critical] unauthenticated-service: redis']), NOW, KEY)
+  // Attacker rewrites the JSON to hide it (zero fingerprints) but can't forge the HMAC.
+  const { createHash } = await import('node:crypto')
+  const file = join(dir, K.replace(/[^a-z0-9]/gi, '') + '.json')
+  const obj = JSON.parse(await readFile(file, 'utf8')); obj.fingerprints = []; await writeFile(file, JSON.stringify(obj))
+  // Next run: WITH the key, the tamper is caught → fail-closed, not "0 NEW".
+  const d = await diffBaseline(dir, K, mk(['[critical] unauthenticated-service: redis']), KEY)
+  assert.equal(d.tampered, true, 'the rewritten baseline fails the HMAC check')
+  assert.equal(d.first, true, 'a tampered baseline is not trusted for the diff')
+  void createHash
+})
