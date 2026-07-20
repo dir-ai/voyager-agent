@@ -3,6 +3,7 @@ import { scan } from '@dir-ai/voyager-net'
 import { scout } from '@dir-ai/voyager-repo'
 import { observe } from '@dir-ai/voyager-browser'
 import { browserBriefToClaim, netBriefToClaim, repoBriefToClaim } from './adapters.js'
+import { proposeRemediations } from './remediation.js'
 import { DeterministicBrain, type Brain } from './brain.js'
 import { ERROR_CLAIM_CONFIDENCE, USABLE_OBSERVATION_CONFIDENCE } from './constants.js'
 
@@ -21,6 +22,9 @@ export interface MissionInput {
   brain?: Brain
   /** Max rounds of iterative probing AFTER the initial observe (default 2, 0 = off). */
   maxRounds?: number
+  /** Propose consent-gated (withheld) remediations for remediable findings via the
+   *  HANDS. Default true; the proposals are always withheld, never applied. */
+  remediate?: boolean
   /** Execute a chosen next-probe against a real sense, returning a new claim (or
    *  null to stop iterating). Injected so the reasoning model decides HOW to run a
    *  probe; the safe default only deepens repo dependency-vetting. */
@@ -158,7 +162,18 @@ export async function runMission(intent: string, input: MissionInput, now: numbe
   mission.addClaim(
     newClaim({ missionId: mission.id, goalId: concludeGoalId, sense: 'memory', operation: 'verify', verdict: usable ? 'mission reached a conclusion from usable observations' : 'mission concluded but observations were insufficient', confidence: usable ? 0.8 : 0.3, verification: { passed: usable, method: 'usable-observation check' } }, now),
   )
+  // Every goal is now accounted for: observed, synthesized, verified. Close them
+  // so mission.state().satisfied reflects a real conclusion (the iterative-loop
+  // refactor left only the observe goal closed).
   for (const g of goals) mission.setGoalStatus(g.id, 'satisfied')
+  // ── Propose remediation (the HANDS): remediable findings → consent-gated `act`
+  // claims, always WITHHELD. The agent never applies — it plans a reversible fix
+  // and hands the mission a pendingAction. Sensing autonomous; acting gated.
+  if (input.remediate !== false) {
+    const acts = await proposeRemediations(mission.allClaims(), now)
+    for (const a of acts) mission.addClaim(a)
+    if (acts.length) log(`hands: proposed ${acts.length} reversible remediation(s) — all WITHHELD pending consent`)
+  }
 
   return { capabilities: cg, mission }
 }

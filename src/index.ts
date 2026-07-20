@@ -10,5 +10,6 @@ export { runMission, type MissionInput, type MissionRun, type ProbeContext } fro
 export { type Brain, DeterministicBrain } from './brain.js'
 export { LlmBrain, type Complete, type ChatMessage, type LlmBrainOptions, extractJson } from './llm-brain.js'
 export { netBriefToClaim, repoBriefToClaim, browserBriefToClaim } from './adapters.js'
+export { proposeRemediations } from './remediation.js'
 export { ERROR_CLAIM_CONFIDENCE, USABLE_OBSERVATION_CONFIDENCE } from './constants.js'
 export { VERSION } from './version.js'

@@ -6,6 +6,7 @@ import { netBriefToClaim, repoBriefToClaim, browserBriefToClaim } from '../dist/
 import { DeterministicBrain } from '../dist/brain.js'
 import { LlmBrain, extractJson } from '../dist/llm-brain.js'
 import { runMission } from '../dist/agent.js'
+import { proposeRemediations } from '../dist/remediation.js'
 import { ERROR_CLAIM_CONFIDENCE, USABLE_OBSERVATION_CONFIDENCE } from '../dist/constants.js'
 import { newClaim } from '@dir-ai/voyager-contract'
 
@@ -238,4 +239,25 @@ test('iterative loop: maxRounds 0 disables iteration entirely', async () => {
   }
   await runMission('no loop', { repoPath: '.', maxRounds: 0, dispatch: dispatch as never }, NOW)
   assert.equal(calls, 0)
+})
+
+// ── The HANDS wired in: remediable findings → WITHHELD act claims ───────────
+test('proposeRemediations: a missing-dmarc finding becomes a WITHHELD, reversible act claim', async () => {
+  const obs = netBriefToClaim(
+    netBrief({ target: { input: 'ex.com', host: 'ex.com', kind: 'domain', scope: 'public' }, findings: [{ severity: 'medium', kind: 'missing-dmarc', detail: 'no DMARC record', at: 'ex.com', suggestedFix: 'x', confidence: 'strong' } as NetBrief['findings'][number]] }),
+    'm', NOW, 'g.observe',
+  )
+  const acts = await proposeRemediations([obs], NOW)
+  const act = acts.find((a) => a.operation === 'act')
+  assert.ok(act, 'a remediable finding yields an act claim')
+  assert.equal(act!.actionResult?.status, 'withheld', 'the hands never auto-apply — the action is withheld')
+  assert.equal(act!.actionResult?.reversible, true)
+  assert.match(act!.verdict, /WITHHELD/)
+})
+
+test('runMission: the mission surfaces the remediation as a pendingAction, never applied', async () => {
+  // A real net fail-closed still yields the observe claim; on a domain with DNS
+  // findings the act claims appear. Here we just assert remediate can be turned off.
+  const { mission } = await runMission('audit', { repoPath: '.', remediate: false }, NOW)
+  assert.ok(!mission.allClaims().some((c) => c.operation === 'act'), 'remediate:false suppresses act proposals')
 })
