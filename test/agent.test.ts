@@ -359,3 +359,10 @@ test('capabilityDispatch: a web probe with no url and no authorized host is NOT 
   )
   assert.equal(claim, null, 'an UNauthorized host does not get a derived web observation')
 })
+
+// Kimi #10: multi-target — several repos/hosts/URLs correlated in ONE mission.
+test('runMission: MULTI-TARGET fans out over repoPaths[] into one mission', async () => {
+  const { mission } = await runMission('audit both repos', { repoPaths: ['.', '.'], repoPath: 'node_modules/@dir-ai/voyager-contract' }, NOW)
+  const repoObs = mission.allClaims().filter((c) => c.sense === 'repo' && c.operation === 'observe')
+  assert.ok(repoObs.length >= 2, `expected multiple repo observations in one mission, got ${repoObs.length}`)
+})

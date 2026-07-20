@@ -14,6 +14,11 @@ export interface MissionInput {
   host?: string
   /** A live URL to observe (via voyager-browser). */
   url?: string
+  /** MULTI-TARGET: audit several repos/hosts/URLs in ONE mission, correlated in the
+   *  same MissionGraph (Kimi #10). Merged with the singular fields above. */
+  repoPaths?: string[]
+  hosts?: string[]
+  urls?: string[]
   /** REQUIRED to actually scan the host (voyager-net's fail-closed gate). */
   authorized?: boolean
   /** Ports for the net scan — open the sense wider than the default sweep (Kimi A3).
@@ -140,28 +145,35 @@ export async function runMission(intent: string, input: MissionInput, now: numbe
   const observeGoalId = goals[0]?.id
   const concludeGoalId = goals[goals.length - 1]?.id
 
-  // ── Observe: fan out across the real senses, resilient (allSettled semantics) ──
+  // ── Observe: fan out across the real senses AND every target, resilient
+  // (allSettled semantics). Multi-target: singular + plural fields are merged and
+  // de-duplicated, so N repos / N hosts / N URLs are all observed into ONE mission.
+  const uniq = (xs: Array<string | undefined>): string[] => [...new Set(xs.filter((x): x is string => !!x))]
+  const repoPaths = uniq([input.repoPath, ...(input.repoPaths ?? [])])
+  const hosts = uniq([input.host, ...(input.hosts ?? [])])
+  const urls = uniq([input.url, ...(input.urls ?? [])])
+
   const jobs: Array<Promise<{ claim: CognitiveClaim; capability: string }>> = []
-  if (input.repoPath) {
+  for (const repoPath of repoPaths) {
     jobs.push(
-      senseJob('repo', 'repo.scout', async () => repoBriefToClaim(await scout(input.repoPath!, { checkDeps: input.checkDeps }), mission.id, now, observeGoalId), now, mission.id, observeGoalId).then((claim) => {
-        log(`repo sense: oriented in ${input.repoPath}`)
+      senseJob('repo', 'repo.scout', async () => repoBriefToClaim(await scout(repoPath, { checkDeps: input.checkDeps }), mission.id, now, observeGoalId), now, mission.id, observeGoalId).then((claim) => {
+        log(`repo sense: oriented in ${repoPath}`)
         return { claim, capability: 'repo.scout' }
       }),
     )
   }
-  if (input.host) {
+  for (const host of hosts) {
     jobs.push(
-      senseJob('net', 'net.scan', async () => netBriefToClaim(await scan(input.host!, { authorized: input.authorized, ports: input.ports, timeoutMs: input.timeoutMs }), mission.id, now, observeGoalId), now, mission.id, observeGoalId).then((claim) => {
-        log(`net sense: audited ${input.host}`)
+      senseJob('net', 'net.scan', async () => netBriefToClaim(await scan(host, { authorized: input.authorized, ports: input.ports, timeoutMs: input.timeoutMs }), mission.id, now, observeGoalId), now, mission.id, observeGoalId).then((claim) => {
+        log(`net sense: audited ${host}`)
         return { claim, capability: 'net.scan' }
       }),
     )
   }
-  if (input.url) {
+  for (const url of urls) {
     jobs.push(
-      senseJob('web', 'browser.observe', async () => browserBriefToClaim(await observe(input.url!), mission.id, now, observeGoalId), now, mission.id, observeGoalId).then((claim) => {
-        log(`browser sense: observed ${input.url}`)
+      senseJob('web', 'browser.observe', async () => browserBriefToClaim(await observe(url), mission.id, now, observeGoalId), now, mission.id, observeGoalId).then((claim) => {
+        log(`browser sense: observed ${url}`)
         return { claim, capability: 'browser.observe' }
       }),
     )
@@ -227,9 +239,9 @@ export async function runMission(intent: string, input: MissionInput, now: numbe
   // conclusion says so instead of quietly declaring success. This is what stops a
   // repo+host mission from reading "satisfied" when the host scan was refused.
   const requestedSenses: CognitiveClaim['sense'][] = []
-  if (input.repoPath) requestedSenses.push('repo')
-  if (input.host) requestedSenses.push('net')
-  if (input.url) requestedSenses.push('web')
+  if (repoPaths.length) requestedSenses.push('repo')
+  if (hosts.length) requestedSenses.push('net')
+  if (urls.length) requestedSenses.push('web')
   const usableSenses = new Set(
     mission.allClaims().filter((c) => c.operation === 'observe' && c.confidence >= USABLE_OBSERVATION_CONFIDENCE).map((c) => c.sense),
   )
