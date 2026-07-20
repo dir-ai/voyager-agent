@@ -10,6 +10,7 @@ import { proposeRemediations } from '../dist/remediation.js'
 import { correlate } from '../dist/correlate.js'
 import { diffBaseline, saveBaseline, fingerprints } from '../dist/baseline.js'
 import { missionReport } from '../dist/report.js'
+import { complianceFor, controlTags } from '../dist/compliance.js'
 import { progrexComplete, ProgrexBrain } from '../dist/progrex.js'
 import { CapabilityGraph, seedFamilyCapabilities } from '@dir-ai/voyager-contract'
 import type { MissionState, NextProbe } from '@dir-ai/voyager-contract'
@@ -437,4 +438,15 @@ test('missionReport: emits a signed SARIF 2.1.0 log with results + honest scope 
   assert.equal(sarif.runs[0].results[0].level, 'error')
   assert.match(rep.signature, /^sha256:[0-9a-f]{64}$/)
   assert.match(sarif.runs[0].properties.scopeDisclaimer, /does NOT test|not a guarantee/)
+})
+
+// Kimi #12: compliance mapping — every finding cites its CIS/OWASP/NIST control.
+test('compliance: finding kinds map to CIS/OWASP/NIST and appear as SARIF tags', () => {
+  assert.match(controlTags(complianceFor('unauthenticated-service')).join(' '), /CIS 4\.1.*OWASP.*NIST AC-3/)
+  assert.ok(controlTags(complianceFor('iac-public-bucket')).some((t) => /OWASP A01/.test(t)))
+  assert.equal(complianceFor('not-a-real-kind'), null)
+  const m = new MissionGraph('m', 'audit', 'x')
+  m.addClaim(newClaim({ missionId: 'm', sense: 'net', operation: 'observe', verdict: 'x', confidence: 0.9, evidence: [{ what: '[critical] unauthenticated-service: Redis', at: 'h:6379' }] }, NOW))
+  const sarif = missionReport(m, { now: NOW }).sarif as { runs: Array<{ results: Array<{ properties: { tags: string[] } }> }> }
+  assert.ok(sarif.runs[0].results[0].properties.tags.some((t) => /CIS 4\.1/.test(t)), 'SARIF result carries compliance tags')
 })

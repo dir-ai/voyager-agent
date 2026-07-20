@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { MissionGraph } from '@dir-ai/voyager-contract'
 import { VERSION } from './version.js'
+import { complianceFor, controlTags } from './compliance.js'
 
 /**
  * The client-grade artifact — a SARIF 2.1.0 report + a signature. Kimi's operative
@@ -32,12 +33,14 @@ export function missionReport(mission: MissionGraph, opts: { now: number; target
       const kind = m?.[2] ?? 'finding'
       const detail = (m?.[3] ?? e.what).trim()
       ruleIds.add(`${c.sense}/${kind}`)
+      const tags = controlTags(complianceFor(kind))
       results.push({
         ruleId: `${c.sense}/${kind}`,
         level: LEVEL[sev] ?? 'note',
         message: { text: detail.slice(0, 1000) },
         locations: e.at ? [{ physicalLocation: { artifactLocation: { uri: String(e.at).slice(0, 400) } } }] : [],
-        properties: { sense: c.sense, severity: sev, confidence: c.confidence },
+        // Compliance controls as SARIF tags — the CIS/OWASP/NIST vocabulary a CISO reports against.
+        properties: { sense: c.sense, severity: sev, confidence: c.confidence, tags },
       })
     }
   }
