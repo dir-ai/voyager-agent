@@ -100,6 +100,9 @@ async function main(): Promise<number> {
       timeoutMs: Number.isFinite(timeoutRaw) ? Math.min(15_000, Math.max(500, timeoutRaw)) : undefined,
       wrapScanners: flags['wrap-scanners'] === true,
       baselineDir: typeof flags.baseline === 'string' ? flags.baseline : undefined, // track drift
+      repoPaths: typeof flags.repos === 'string' ? flags.repos.split(',').map((s) => s.trim()).filter(Boolean) : undefined,
+      hosts: typeof flags.hosts === 'string' ? flags.hosts.split(',').map((s) => s.trim()).filter(Boolean) : undefined,
+      urls: typeof flags.urls === 'string' ? flags.urls.split(',').map((s) => s.trim()).filter(Boolean) : undefined,
       onLog: (l) => { if (!json) console.error(`  · ${l}`) },
     },
     Date.now(),

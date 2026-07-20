@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, generateKeyPairSync, sign as edSign, verify as edVerify, createPublicKey, createPrivateKey, type KeyObject } from 'node:crypto'
 import type { MissionGraph } from '@dir-ai/voyager-contract'
 import { VERSION } from './version.js'
 import { complianceFor, controlTags } from './compliance.js'
@@ -15,12 +15,23 @@ const LEVEL: Record<string, 'error' | 'warning' | 'note'> = { critical: 'error',
 
 export interface MissionReport {
   sarif: unknown
-  /** SHA-256 over the canonical SARIF — the tamper-evident signature. */
+  /** An Ed25519 signature (base64) over the canonical report — AUTHENTICITY, not just
+   *  integrity: forging findings and re-hashing no longer produces a valid artifact
+   *  (Kimi R3-7). Verify with the embedded public key + verifyReport(). */
   signature: string
+  /** The Ed25519 public key (SPKI PEM) needed to verify — embedded in the SARIF too. */
+  publicKey: string
   findingCount: number
 }
 
-export function missionReport(mission: MissionGraph, opts: { now: number; targets?: string[] }): MissionReport {
+/** A stable signer: a PEM Ed25519 private key (from a vault) → a persistent identity.
+ *  Omit it and the report is signed with an EPHEMERAL key (still tamper-evident, but
+ *  bind a stable key for cross-report authenticity). */
+export interface SignOptions {
+  privateKeyPem?: string
+}
+
+export function missionReport(mission: MissionGraph, opts: { now: number; targets?: string[]; sign?: SignOptions }): MissionReport {
   const state = mission.state()
   // Gather findings from observed evidence: [sev] kind: detail @ at.
   const results: Array<Record<string, unknown>> = []
@@ -61,7 +72,40 @@ export function missionReport(mission: MissionGraph, opts: { now: number; target
       },
     ],
   }
+  // Ed25519 SIGNATURE over the canonical report (before the signature block is added).
+  // A stable vault key gives a persistent identity; else an ephemeral one is minted.
+  const { privateKey, publicKey } = opts.sign?.privateKeyPem
+    ? (() => { const priv = createPrivateKey(opts.sign!.privateKeyPem!); return { privateKey: priv, publicKey: createPublicKey(priv) } })()
+    : generateKeyPairSync('ed25519')
   const canonical = JSON.stringify(sarif)
-  const signature = `sha256:${createHash('sha256').update(canonical).digest('hex')}`
-  return { sarif, signature, findingCount: results.length }
+  const digest = createHash('sha256').update(canonical).digest('hex')
+  const signature = edSign(null, Buffer.from(canonical), privateKey).toString('base64')
+  const publicKeyPem = (publicKey as KeyObject).export({ type: 'spki', format: 'pem' }).toString()
+  // Embed the attestation so the artifact is self-verifiable (verifyReport()).
+  ;(sarif.runs[0].properties as Record<string, unknown>).attestation = {
+    alg: 'ed25519', signature, publicKey: publicKeyPem, sha256: digest, signedAt: new Date(opts.now).toISOString(),
+    note: opts.sign?.privateKeyPem ? 'signed with a bound key' : 'signed with an EPHEMERAL key — bind a stable vault key for cross-report authenticity',
+  }
+  return { sarif, signature, publicKey: publicKeyPem, findingCount: results.length }
+}
+
+/**
+ * Verify a report's embedded Ed25519 attestation. Recomputes the canonical report
+ * WITHOUT the attestation block and checks the signature against the embedded public
+ * key. Returns true only if the artifact is untampered — forging a finding and
+ * re-hashing (the Kimi R3-7 attack) now FAILS here.
+ */
+export function verifyReport(sarif: unknown): boolean {
+  try {
+    const s = sarif as { runs?: Array<{ properties?: Record<string, unknown> }> }
+    const props = s.runs?.[0]?.properties
+    const att = props?.attestation as { alg?: string; signature?: string; publicKey?: string } | undefined
+    if (!props || !att?.signature || !att.publicKey || att.alg !== 'ed25519') return false
+    const clone = JSON.parse(JSON.stringify(sarif)) as typeof s
+    delete clone.runs![0].properties!.attestation
+    const canonical = JSON.stringify(clone)
+    return edVerify(null, Buffer.from(canonical), createPublicKey(att.publicKey), Buffer.from(att.signature, 'base64'))
+  } catch {
+    return false
+  }
 }

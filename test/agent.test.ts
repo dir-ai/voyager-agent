@@ -9,7 +9,7 @@ import { runMission, capabilityDispatch } from '../dist/agent.js'
 import { proposeRemediations } from '../dist/remediation.js'
 import { correlate } from '../dist/correlate.js'
 import { diffBaseline, saveBaseline, fingerprints } from '../dist/baseline.js'
-import { missionReport } from '../dist/report.js'
+import { missionReport, verifyReport } from '../dist/report.js'
 import { complianceFor, controlTags } from '../dist/compliance.js'
 import { progrexComplete, ProgrexBrain } from '../dist/progrex.js'
 import { CapabilityGraph, seedFamilyCapabilities } from '@dir-ai/voyager-contract'
@@ -436,7 +436,7 @@ test('missionReport: emits a signed SARIF 2.1.0 log with results + honest scope 
   assert.equal(rep.findingCount, 1)
   assert.equal(sarif.runs[0].results[0].ruleId, 'net/unauthenticated-service')
   assert.equal(sarif.runs[0].results[0].level, 'error')
-  assert.match(rep.signature, /^sha256:[0-9a-f]{64}$/)
+  assert.ok(rep.signature.length > 40 && rep.publicKey.includes('PUBLIC KEY')) // Ed25519 sig (base64) + SPKI pubkey
   assert.match(sarif.runs[0].properties.scopeDisclaimer, /does NOT test|not a guarantee/)
 })
 
@@ -449,4 +449,17 @@ test('compliance: finding kinds map to CIS/OWASP/NIST and appear as SARIF tags',
   m.addClaim(newClaim({ missionId: 'm', sense: 'net', operation: 'observe', verdict: 'x', confidence: 0.9, evidence: [{ what: '[critical] unauthenticated-service: Redis', at: 'h:6379' }] }, NOW))
   const sarif = missionReport(m, { now: NOW }).sarif as { runs: Array<{ results: Array<{ properties: { tags: string[] } }> }> }
   assert.ok(sarif.runs[0].results[0].properties.tags.some((t) => /CIS 4\.1/.test(t)), 'SARIF result carries compliance tags')
+})
+
+// Kimi R3-7: a REAL signature (Ed25519) — forging findings + re-signing fails verify.
+test('report: Ed25519 attestation verifies; tampering with a finding breaks verification', () => {
+  const m = new MissionGraph('m', 'audit', 'x')
+  m.addClaim(newClaim({ missionId: 'm', sense: 'net', operation: 'observe', verdict: 'x', confidence: 0.9, evidence: [{ what: '[critical] unauthenticated-service: Redis', at: 'h:6379' }] }, NOW))
+  const rep = missionReport(m, { now: NOW })
+  const sarif = rep.sarif as { runs: Array<{ results: Array<{ message: { text: string } }>; properties: { attestation: { alg: string } } }> }
+  assert.equal(sarif.runs[0].properties.attestation.alg, 'ed25519')
+  assert.equal(verifyReport(sarif), true, 'the untampered report verifies')
+  // Forge a finding (the R3-7 attack) — WITHOUT the private key, verification must fail.
+  sarif.runs[0].results[0].message.text = 'TAMPERED — no findings here'
+  assert.equal(verifyReport(sarif), false, 'a tampered report no longer verifies')
 })

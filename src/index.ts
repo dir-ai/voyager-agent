@@ -14,7 +14,7 @@ export { netBriefToClaim, repoBriefToClaim, browserBriefToClaim } from './adapte
 export { proposeRemediations } from './remediation.js'
 export { correlate } from './correlate.js'
 export { diffBaseline, saveBaseline, driftClaim, fingerprints, missionKey, type BaselineDiff } from './baseline.js'
-export { missionReport, type MissionReport } from './report.js'
+export { missionReport, verifyReport, type MissionReport, type SignOptions } from './report.js'
 export { complianceFor, controlTags, type Controls } from './compliance.js'
 export { ERROR_CLAIM_CONFIDENCE, USABLE_OBSERVATION_CONFIDENCE } from './constants.js'
 export { VERSION } from './version.js'
