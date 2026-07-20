@@ -104,7 +104,11 @@ export async function capabilityDispatch(probe: NextProbe, ctx: ProbeContext): P
     const url = input.url ?? deriveWebTarget(ctx.mission, input)
     const already = ctx.mission.allClaims().some((c) => c.sense === 'web' && c.operation === 'observe')
     if (url && !already) {
-      const brief = await observe(url)
+      // Thread the mission's authorization to the browser sense: an owner-audit
+      // (authorized:true) can observe its OWN private/loopback/intranet URL; a
+      // public mission stays public-gated. Without this the web sense died at the
+      // SSRF gate on internal targets even when the caller authorized the host.
+      const brief = await observe(url, { authorized: input.authorized })
       return browserBriefToClaim(brief, missionId, now)
     }
   }
@@ -185,7 +189,7 @@ export async function runMission(intent: string, input: MissionInput, now: numbe
   }
   for (const url of urls) {
     jobs.push(
-      senseJob('web', 'browser.observe', async () => browserBriefToClaim(await observe(url), mission.id, now, observeGoalId), now, mission.id, observeGoalId).then((claim) => {
+      senseJob('web', 'browser.observe', async () => browserBriefToClaim(await observe(url, { authorized: input.authorized }), mission.id, now, observeGoalId), now, mission.id, observeGoalId).then((claim) => {
         log(`browser sense: observed ${url}`)
         return { claim, capability: 'browser.observe' }
       }),
