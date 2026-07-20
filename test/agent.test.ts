@@ -11,6 +11,7 @@ import { correlate } from '../dist/correlate.js'
 import { diffBaseline, saveBaseline, fingerprints } from '../dist/baseline.js'
 import { missionReport, verifyReport } from '../dist/report.js'
 import { complianceFor, controlTags } from '../dist/compliance.js'
+import { nextMovesFor } from '../dist/next-moves.js'
 import { runActiveVerification, deriveVerifyTargets } from '../dist/verify.js'
 import type { ActiveVerifier, VerifiedFinding, VerifyTarget, VerifyContext } from '../dist/verify.js'
 import type { PageBrief } from '@dir-ai/voyager-browser'
@@ -505,6 +506,63 @@ test('drift baseline: HMAC seal — a tampered baseline is refused (fail-closed)
   void createHash
 })
 
+// ── FINDING→MOVE GRAPH (Kimi "shopping list, not a kill chain"): the SARIF now
+// carries the ADVISORY next probe(s) per finding — advice, never execution.
+test('nextMovesFor: each escalation edge names the technique; unmapped kinds still get a sensible hint', () => {
+  assert.match(nextMovesFor('web', 'missing-csp')[0], /XSS/)
+  assert.match(nextMovesFor('web', 'weak-cookie')[0], /session theft|XSS session hijack/)
+  assert.match(nextMovesFor('web', 'cors-credentials')[0], /cross-origin|CORS/)
+  assert.match(nextMovesFor('web', 'exposed-endpoint')[0], /IDOR|BOLA|verb tampering/)
+  assert.match(nextMovesFor('web', 'graphql-introspection-enabled')[0], /mutation|introspection/)
+  assert.match(nextMovesFor('net', 'exposed-service')[0], /default creds|unauth/i)
+  assert.match(nextMovesFor('net', 'ssh-weak-algorithm')[0], /CVE/)
+  assert.match(nextMovesFor('net', 'version-leak')[0], /CVE|OSV|NVD/)
+  // A tls-* kind we didn't enumerate falls back to the TLS family hint; a truly
+  // unknown kind still yields a non-empty analyst-review hint (never empty).
+  assert.match(nextMovesFor('net', 'tls-something-new')[0], /TLS/)
+  assert.ok(nextMovesFor('repo', 'totally-unknown-kind')[0].length > 0)
+})
+
+test('missionReport: a missing-csp + weak-cookie + exposed-service mission yields non-empty, sensible suggestedNextProbes', () => {
+  const m = new MissionGraph('m', 'audit', 'x')
+  // Three findings across two senses (web + net) — the exact scenario the audit cited.
+  m.addClaim(newClaim({ missionId: 'm', sense: 'web', operation: 'observe', verdict: 'page', confidence: 0.8, evidence: [
+    { what: '[medium] missing-csp: no Content-Security-Policy header', at: 'https://app.test/' },
+    { what: '[medium] weak-cookie: session cookie without HttpOnly/Secure/SameSite', at: 'https://app.test/' },
+  ] }, NOW))
+  m.addClaim(newClaim({ missionId: 'm', sense: 'net', operation: 'observe', verdict: 'host', confidence: 0.9, evidence: [
+    { what: '[high] exposed-service: redis reachable', at: 'app.test:6379' },
+  ] }, NOW))
+
+  const rep = missionReport(m, { now: NOW, targets: ['app.test'] })
+  const sarif = rep.sarif as { runs: Array<{
+    results: Array<{ ruleId: string; properties: { suggestedNextProbes: string[] } }>
+    properties: { suggestedNextProbes: Array<{ ruleId: string; suggestedNextProbes: string[] }>; executedProbes: { chained: unknown[]; chainedCount: number; note: string } }
+  }> }
+  const run = sarif.runs[0]
+
+  // Per-result advice: each finding carries a non-empty escalation move naming a technique.
+  for (const kind of ['missing-csp', 'weak-cookie', 'exposed-service']) {
+    const r = run.results.find((x) => x.ruleId === `${kind === 'exposed-service' ? 'net' : 'web'}/${kind}`)
+    assert.ok(r, `result for ${kind} present`)
+    assert.ok(r!.properties.suggestedNextProbes.length > 0, `${kind} has a next move`)
+  }
+  // The run-level kill chain names the escalation technique for each finding.
+  const chain = run.properties.suggestedNextProbes
+  const blob = JSON.stringify(chain)
+  assert.ok(chain.length >= 3, 'the kill chain covers every distinct finding-kind')
+  assert.match(blob, /XSS/, 'missing-csp/weak-cookie escalate to XSS')
+  assert.match(blob, /default creds|unauth/i, 'exposed-service escalates to default-cred/unauth access')
+  assert.ok(chain.every((e) => e.suggestedNextProbes.length > 0), 'no empty edge in the kill chain')
+
+  // executedProbes: NOTHING was chained (read-only, no verifier) — all ADVISORY.
+  assert.equal(run.properties.executedProbes.chainedCount, 0)
+  assert.match(run.properties.executedProbes.note, /ADVISORY|read-only/i)
+
+  // Still a valid, signed, verifiable artifact (advice lives inside the signed doc).
+  assert.equal(verifyReport(sarif, { anchorPublicKeyPem: rep.publicKey }).authentic, true)
+})
+
 // ── ACTIVE VERIFICATION SEAM: read-only agent + INJECTED offensive engine ────────
 // The public agent ships ZERO offensive code. A verifier is injected (mirroring the
 // brain seam); confirmed results become DEMONSTRATED `exploit-verified` findings and
@@ -627,7 +685,7 @@ test('runMission (case a): authorized + consent + injected verifier → exploit-
     assert.equal(exploits.length, 2, 'two demonstrated web vulns')
 
     const rep = missionReport(mission, { now: NOW, targets: [url] })
-    const sarif = rep.sarif as { runs: Array<{ results: Array<{ ruleId: string; level: string; properties: { demonstrated?: boolean; vulnKind?: string; attestation?: string; tags: string[] } }>; properties: { activeVerification: { ran: boolean; confirmed: unknown[]; observedOnly: string[] } } }> }
+    const sarif = rep.sarif as { runs: Array<{ results: Array<{ ruleId: string; level: string; properties: { demonstrated?: boolean; vulnKind?: string; attestation?: string; tags: string[] } }>; properties: { activeVerification: { ran: boolean; confirmed: unknown[]; observedOnly: string[] }; executedProbes: { chained: Array<{ vulnKind: string }>; chainedCount: number } } }> }
     const demonstrated = sarif.runs[0].results.filter((r) => r.ruleId === 'web/exploit-verified')
     assert.equal(demonstrated.length, 2, 'exploit-verified findings land in the SARIF')
     assert.ok(demonstrated.every((r) => r.level === 'error' && r.properties.demonstrated === true), 'DEMONSTRATED severity → error, flagged demonstrated')
@@ -643,6 +701,11 @@ test('runMission (case a): authorized + consent + injected verifier → exploit-
     assert.equal(cov.ran, true)
     assert.equal(cov.confirmed.length, 2)
     assert.ok(Array.isArray(cov.observedOnly), 'the report declares which classes were observed-only')
+    // executedProbes: the two demonstrated vulns WERE actually chained (via the injected
+    // verifier) — the honest "what WAS chained" split, not a pure advisory list.
+    const exec = sarif.runs[0].properties.executedProbes
+    assert.equal(exec.chainedCount, 2, 'both demonstrated findings are recorded as chained')
+    assert.ok(exec.chained.some((x) => x.vulnKind === 'xss') && exec.chained.some((x) => x.vulnKind === 'sqli'))
   })
 })
 

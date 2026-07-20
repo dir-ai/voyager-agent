@@ -3,6 +3,7 @@ import type { MissionGraph } from '@dir-ai/voyager-contract'
 import { stripInjection } from '@dir-ai/voyager'
 import { VERSION } from './version.js'
 import { complianceFor, controlTags } from './compliance.js'
+import { nextMovesFor } from './next-moves.js'
 
 /**
  * P0 (Kimi, verified live): the signed SARIF must NEVER embed target-derived text
@@ -67,6 +68,9 @@ export function missionReport(mission: MissionGraph, opts: { now: number; target
   // Gather findings from observed evidence: [sev] kind: detail @ at.
   const results: Array<Record<string, unknown>> = []
   const ruleIds = new Set<string>()
+  // The finding→move graph, aggregated for the run: ruleId → the analyst's next
+  // moves (ADVICE only). Deduped so the run-level kill-chain lists each edge once.
+  const killChain = new Map<string, { ruleId: string; sense: string; kind: string; suggestedNextProbes: string[] }>()
   for (const c of mission.allClaims()) {
     if (c.operation !== 'observe') continue
     for (const e of c.evidence) {
@@ -79,13 +83,19 @@ export function missionReport(mission: MissionGraph, opts: { now: number; target
       const tags = controlTags(complianceFor(kind))
       const ruleId = san(`${c.sense}/${kind}`)
       ruleIds.add(ruleId)
+      // FINDING→MOVE (advice, not execution): the concrete next probe(s) an analyst
+      // would run to escalate this finding. Authored strings, still sanitized before
+      // they enter the signed doc. Nothing is sent — this is the read-only agent.
+      const moves = nextMovesFor(c.sense, kind).map((s) => san(s).slice(0, 400))
+      if (!killChain.has(ruleId)) killChain.set(ruleId, { ruleId, sense: san(c.sense), kind: san(kind), suggestedNextProbes: moves })
       results.push({
         ruleId,
         level: LEVEL[sev] ?? 'note',
         message: { text: san(detail).slice(0, 1000) },
         locations: e.at ? [{ physicalLocation: { artifactLocation: { uri: san(e.at).slice(0, 400) } } }] : [],
         // Compliance controls as SARIF tags — the CIS/OWASP/NIST vocabulary a CISO reports against.
-        properties: { sense: san(c.sense), severity: sev, confidence: c.confidence, tags },
+        // suggestedNextProbes: the ADVISORY escalation move(s) for THIS finding-kind.
+        properties: { sense: san(c.sense), severity: sev, confidence: c.confidence, tags, suggestedNextProbes: moves },
       })
     }
   }
@@ -94,6 +104,9 @@ export function missionReport(mission: MissionGraph, opts: { now: number; target
   // severity → SARIF level 'error', flagged `demonstrated:true` so it is never
   // confused with a statically-observed finding. The engine is injected; this
   // package only ADAPTS its confirmed results — it performs no exploitation.
+  // DEMONSTRATED findings that WERE actively chained (by an injected, consent-gated
+  // verifier) — the honest "what WAS chained" set for the executedProbes note.
+  const chained: Array<{ vulnKind: string; ruleId: string; attestation: string | null }> = []
   for (const c of mission.allClaims()) {
     if (c.capability !== 'verify.active' || c.operation !== 'verify' || c.verification?.passed !== true) continue
     // The lead evidence is `[demonstrated] <vulnKind>: <detail>`; any others are
@@ -107,6 +120,11 @@ export function missionReport(mission: MissionGraph, opts: { now: number; target
     // Control lookup on the RAW vuln class; the value embedded in the doc is sanitized.
     const tags = controlTags(complianceFor(vulnKindRaw) ?? complianceFor('exploit-verified'))
     const receipt = (c.continuationState?.attestation as { receipt?: string } | null)?.receipt ?? null
+    // Post-exploitation advice for a demonstrated finding — still ADVICE (the further
+    // chaining is the hands engine's job, consent-gated, out of scope here).
+    const moves = nextMovesFor(c.sense, vulnKindRaw).map((s) => san(s).slice(0, 400))
+    if (!killChain.has(ruleId)) killChain.set(ruleId, { ruleId, sense: san(c.sense), kind: san('exploit-verified'), suggestedNextProbes: moves })
+    chained.push({ vulnKind: san(vulnKindRaw), ruleId, attestation: receipt ? san(receipt) : null })
     results.push({
       ruleId,
       level: 'error',
@@ -116,6 +134,7 @@ export function missionReport(mission: MissionGraph, opts: { now: number; target
         sense: san(c.sense), severity: 'demonstrated', demonstrated: true, vulnKind: san(vulnKindRaw), confidence: c.confidence, tags,
         attestation: receipt ? san(receipt) : null, method: c.verification?.method ? san(c.verification.method) : null,
         evidence: c.evidence.slice(1).map((e) => san(e.what).slice(0, 300)),
+        suggestedNextProbes: moves,
       },
     })
   }
@@ -136,6 +155,21 @@ export function missionReport(mission: MissionGraph, opts: { now: number; target
   const coverage = san(verify?.verification?.method ?? 'see mission verification')
   const notTested = 'This report attests ONLY the controls Voyager tested (read-only introspection of the declared targets). It does NOT test: credentialed/authenticated access, business logic, 0-days, phishing/social, insider threat, or anything outside the declared scope. Absence of a finding within scope is not a guarantee of security.'
 
+  // ── The kill chain (ADVICE): every finding-kind → the analyst's next move(s).
+  // Turns the SARIF from a shopping list into an escalation plan WITHOUT executing
+  // anything. `executedProbes` is the honest split: what the mission ACTUALLY chained
+  // (only the consent-gated active-verification path can, and only when injected) vs
+  // what remains an operator HYPOTHESIS. This read-only agent SUGGESTS the move; the
+  // offensive execution is the separate `voyager-hands` engine (out of scope here).
+  const suggestedNextProbes = [...killChain.values()]
+  const executedProbes = {
+    chained,
+    chainedCount: chained.length,
+    note: chained.length
+      ? 'Only the actively-verified findings were CHAINED, via an injected, consent-gated verifier (see activeVerification). Every entry in suggestedNextProbes that is NOT listed here is an ADVISORY hypothesis for the operator — this read-only agent did not execute it.'
+      : 'NOTHING was chained: all entries in suggestedNextProbes are ADVISORY hypotheses for the operator. This read-only agent SUGGESTS the next move in words; it sends no payloads and executes no probes. Offensive execution is the separate consent-gated voyager-hands engine (out of scope for this package).',
+  }
+
   const sarif = {
     $schema: 'https://json.schemastore.org/sarif-2.1.0.json',
     version: '2.1.0',
@@ -151,6 +185,10 @@ export function missionReport(mission: MissionGraph, opts: { now: number; target
           // The active-verification scope: which classes were ACTIVELY tested (and
           // demonstrated) vs which are OBSERVED ONLY. Absent when no verifier ran.
           activeVerification: activeCoverage ?? { ran: false, note: 'no active verification — all findings are OBSERVED ONLY (read-only introspection). Inject a consent-gated verifier to actively demonstrate suspected web vulns.' },
+          // THE KILL CHAIN (advice, not execution): finding-kind → next escalation
+          // move(s) with the named technique, plus the honest executed-vs-advisory split.
+          suggestedNextProbes,
+          executedProbes,
         },
       },
     ],
