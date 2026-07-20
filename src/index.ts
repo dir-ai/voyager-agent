@@ -13,5 +13,7 @@ export { ProgrexBrain, progrexComplete, type ProgrexBrainOptions, PROGREX_DEFAUL
 export { netBriefToClaim, repoBriefToClaim, browserBriefToClaim } from './adapters.js'
 export { proposeRemediations } from './remediation.js'
 export { correlate } from './correlate.js'
+export { diffBaseline, saveBaseline, driftClaim, fingerprints, missionKey, type BaselineDiff } from './baseline.js'
+export { missionReport, type MissionReport } from './report.js'
 export { ERROR_CLAIM_CONFIDENCE, USABLE_OBSERVATION_CONFIDENCE } from './constants.js'
 export { VERSION } from './version.js'

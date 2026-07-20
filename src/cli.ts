@@ -25,7 +25,7 @@ function parsePorts(spec: string): number[] | undefined {
 }
 
 function parseArgs(argv: string[]): { flags: Record<string, string | boolean>; positionals: string[] } {
-  const boolean = new Set(['json', 'authorized'])
+  const boolean = new Set(['json', 'authorized', 'wrap-scanners'])
   const flags: Record<string, string | boolean> = {}
   const positionals: string[] = []
   for (let i = 0; i < argv.length; i++) {
@@ -98,10 +98,21 @@ async function main(): Promise<number> {
       ports, // open the net sense wider (Kimi A3): --ports "1-1000" or "80,443,6379"
       maxRounds: Number.isFinite(maxRoundsRaw) ? Math.min(10, Math.max(0, maxRoundsRaw)) : undefined,
       timeoutMs: Number.isFinite(timeoutRaw) ? Math.min(15_000, Math.max(500, timeoutRaw)) : undefined,
+      wrapScanners: flags['wrap-scanners'] === true,
+      baselineDir: typeof flags.baseline === 'string' ? flags.baseline : undefined, // track drift
       onLog: (l) => { if (!json) console.error(`  · ${l}`) },
     },
     Date.now(),
   )
+
+  // Signed SARIF report artifact (--sarif <file>).
+  if (typeof flags.sarif === 'string') {
+    const { missionReport } = await import('./report.js')
+    const { writeFile } = await import('node:fs/promises')
+    const rep = missionReport(mission, { now: Date.now(), targets: [flags.repo, flags.host, flags.url].filter((x): x is string => typeof x === 'string') })
+    await writeFile(flags.sarif, JSON.stringify(rep.sarif, null, 2), 'utf8')
+    console.error(`  · SARIF report written to ${flags.sarif} (${rep.findingCount} finding(s), signature ${rep.signature.slice(0, 22)}…)`)
+  }
 
   if (json) {
     console.log(JSON.stringify({ intent: mission.intent, claims: mission.allClaims(), state: mission.state() }, null, 2))

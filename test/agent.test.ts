@@ -8,6 +8,8 @@ import { LlmBrain, extractJson } from '../dist/llm-brain.js'
 import { runMission, capabilityDispatch } from '../dist/agent.js'
 import { proposeRemediations } from '../dist/remediation.js'
 import { correlate } from '../dist/correlate.js'
+import { diffBaseline, saveBaseline, fingerprints } from '../dist/baseline.js'
+import { missionReport } from '../dist/report.js'
 import { progrexComplete, ProgrexBrain } from '../dist/progrex.js'
 import { CapabilityGraph, seedFamilyCapabilities } from '@dir-ai/voyager-contract'
 import type { MissionState, NextProbe } from '@dir-ai/voyager-contract'
@@ -395,4 +397,44 @@ test('correlate: links web form → repo route, repo service → net port; missi
   const mission = new MissionGraph('m', 'audit', 'x')
   for (const c of [repo, net, web, corr!]) mission.addClaim(c)
   assert.ok(mission.state().rootCause, 'the mission now has a real rootCause')
+})
+
+// DRIFT — memory across audits: NEW vs RESOLVED between two runs over the same targets.
+test('drift: baseline reports first audit, then NEW and RESOLVED findings on re-run', async () => {
+  const { mkdtemp } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = await mkdtemp(join(tmpdir(), 'voyager-drift-'))
+  const KEY = 'targetsetX'
+  const mk = (findings: string[]) => {
+    const m = new MissionGraph('m', 'audit', 'x')
+    m.addClaim(newClaim({ missionId: 'm', sense: 'net', operation: 'observe', verdict: 'host', confidence: 0.8, evidence: findings.map((f) => ({ what: f, at: 'h:1' })) }, NOW))
+    return m
+  }
+  // Run 1: two findings, first audit.
+  const m1 = mk(['[high] weak-tls: TLS1.0', '[high] exposed-service: redis'])
+  const d1 = await diffBaseline(dir, KEY, m1)
+  assert.equal(d1.first, true)
+  await saveBaseline(dir, KEY, m1, NOW)
+  // Run 2: weak-tls resolved, a NEW mongo finding appears.
+  const m2 = mk(['[high] exposed-service: redis', '[critical] unauthenticated-service: mongo'])
+  const d2 = await diffBaseline(dir, KEY, m2)
+  assert.equal(d2.first, false)
+  assert.ok(d2.added.some((f) => /unauthenticated-service/.test(f)), 'the new mongo finding is flagged as drift')
+  assert.ok(d2.resolved.some((f) => /weak-tls/.test(f)), 'the fixed TLS finding is flagged resolved')
+  assert.ok(d2.persisting.some((f) => /exposed-service/.test(f)), 'the unchanged redis finding persists')
+})
+
+// SARIF — the signed, client-grade report artifact.
+test('missionReport: emits a signed SARIF 2.1.0 log with results + honest scope disclaimer', () => {
+  const m = new MissionGraph('m', 'audit', 'x')
+  m.addClaim(newClaim({ missionId: 'm', sense: 'net', operation: 'observe', verdict: 'host', confidence: 0.9, evidence: [{ what: '[critical] unauthenticated-service: Redis exposed', at: 'h:6379' }] }, NOW))
+  const rep = missionReport(m, { now: NOW, targets: ['h'] })
+  const sarif = rep.sarif as { version: string; runs: Array<{ results: Array<{ ruleId: string; level: string }>; properties: { scopeDisclaimer: string } }> }
+  assert.equal(sarif.version, '2.1.0')
+  assert.equal(rep.findingCount, 1)
+  assert.equal(sarif.runs[0].results[0].ruleId, 'net/unauthenticated-service')
+  assert.equal(sarif.runs[0].results[0].level, 'error')
+  assert.match(rep.signature, /^sha256:[0-9a-f]{64}$/)
+  assert.match(sarif.runs[0].properties.scopeDisclaimer, /does NOT test|not a guarantee/)
 })

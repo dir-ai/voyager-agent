@@ -5,6 +5,7 @@ import { observe } from '@dir-ai/voyager-browser'
 import { browserBriefToClaim, netBriefToClaim, repoBriefToClaim } from './adapters.js'
 import { proposeRemediations } from './remediation.js'
 import { correlate } from './correlate.js'
+import { diffBaseline, saveBaseline, driftClaim, missionKey } from './baseline.js'
 import { DeterministicBrain, dedupeProbes, type Brain } from './brain.js'
 import { ERROR_CLAIM_CONFIDENCE, USABLE_OBSERVATION_CONFIDENCE } from './constants.js'
 
@@ -32,6 +33,10 @@ export interface MissionInput {
   /** WRAP external coverage engines (trivy/semgrep) during the repo scout if on PATH,
    *  adapting their output into framed findings under the gate. Opt-in (slow). */
   wrapScanners?: boolean
+  /** Track DRIFT across audits: a directory where the target set's baseline is
+   *  persisted. On the next run it reports NEW / RESOLVED / unchanged findings —
+   *  "what changed since last time". Off unless set. */
+  baselineDir?: string
   /** The reasoning model. Defaults to a rule-based brain so it runs with no LLM. */
   brain?: Brain
   /** Max rounds of iterative probing AFTER the initial observe (default 2, 0 = off). */
@@ -296,6 +301,17 @@ export async function runMission(intent: string, input: MissionInput, now: numbe
     const acts = await proposeRemediations(mission.allClaims(), now)
     for (const a of acts) mission.addClaim(a)
     if (acts.length) log(`hands: proposed ${acts.length} reversible remediation(s) — all WITHHELD pending consent`)
+  }
+
+  // ── Drift: compare this audit to the last one over the same targets, then persist
+  // the new baseline. Turns a one-shot snapshot into a tracked timeline (NEW /
+  // RESOLVED / unchanged) — memory across missions, opt-in via baselineDir.
+  if (input.baselineDir) {
+    const key = missionKey({ repoPaths, hosts, urls })
+    const diff = await diffBaseline(input.baselineDir, key, mission)
+    mission.addClaim(driftClaim(diff, mission.id, now, concludeGoalId))
+    await saveBaseline(input.baselineDir, key, mission, now)
+    if (!diff.first) log(`drift: ${diff.added.length} new, ${diff.resolved.length} resolved since last audit`)
   }
 
   return { capabilities: cg, mission }
