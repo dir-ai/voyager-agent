@@ -7,11 +7,12 @@ import { DeterministicBrain } from '../dist/brain.js'
 import { LlmBrain, extractJson } from '../dist/llm-brain.js'
 import { runMission, capabilityDispatch } from '../dist/agent.js'
 import { proposeRemediations } from '../dist/remediation.js'
+import { correlate } from '../dist/correlate.js'
 import { progrexComplete, ProgrexBrain } from '../dist/progrex.js'
 import { CapabilityGraph, seedFamilyCapabilities } from '@dir-ai/voyager-contract'
 import type { MissionState, NextProbe } from '@dir-ai/voyager-contract'
 import { ERROR_CLAIM_CONFIDENCE, USABLE_OBSERVATION_CONFIDENCE } from '../dist/constants.js'
-import { newClaim } from '@dir-ai/voyager-contract'
+import { newClaim, MissionGraph } from '@dir-ai/voyager-contract'
 
 const NOW = 1_700_000_000_000
 
@@ -365,4 +366,33 @@ test('runMission: MULTI-TARGET fans out over repoPaths[] into one mission', asyn
   const { mission } = await runMission('audit both repos', { repoPaths: ['.', '.'], repoPath: 'node_modules/@dir-ai/voyager-contract' }, NOW)
   const repoObs = mission.allClaims().filter((c) => c.sense === 'repo' && c.operation === 'observe')
   assert.ok(repoObs.length >= 2, `expected multiple repo observations in one mission, got ${repoObs.length}`)
+})
+
+// The finishing move: cross-sense CAUSALITY (web ↔ repo ↔ net) → real rootCause.
+test('correlate: links web form → repo route, repo service → net port; mission gets a rootCause', () => {
+  const repo = newClaim({ missionId: 'm', sense: 'repo', operation: 'observe', verdict: 'app', confidence: 0.8, entities: [
+    { id: 'repo:project:app', sense: 'repo', kind: 'project', label: 'app' },
+    { id: 'repo:route:/api/login', sense: 'repo', kind: 'route', label: 'POST /api/login' },
+    { id: 'repo:file:src/server.js', sense: 'repo', kind: 'file', label: 'src/server.js' },
+    { id: 'repo:service:db', sense: 'repo', kind: 'service', label: 'db [postgres:16]' },
+  ] }, NOW)
+  const net = newClaim({ missionId: 'm', sense: 'net', operation: 'observe', verdict: 'host', confidence: 0.8, entities: [
+    { id: 'net:host:app.example', sense: 'net', kind: 'host', label: 'app.example' },
+    { id: 'net:port:app.example:5432', sense: 'net', kind: 'port', label: '5432/postgres' },
+    { id: 'net:port:app.example:3000', sense: 'net', kind: 'port', label: '3000/http' },
+  ] }, NOW)
+  const web = newClaim({ missionId: 'm', sense: 'web', operation: 'observe', verdict: 'page', confidence: 0.8, entities: [
+    { id: 'web:form:/api/login', sense: 'web', kind: 'form', label: '/api/login' },
+  ] }, NOW)
+
+  const corr = correlate([repo, net, web], 'm', NOW)
+  assert.ok(corr, 'a correlation claim is produced')
+  const edges = corr!.causalChain.map((l) => `${l.cause}=>${l.effect}`)
+  assert.ok(edges.some((e) => /repo:route:\/api\/login=>web:form:\/api\/login/.test(e)), 'web form linked to the repo route that implements it')
+  assert.ok(edges.some((e) => /repo:service:db=>net:port:app\.example:5432/.test(e)), 'db service linked to its exposed net port')
+
+  // Fed into a mission, the graph now has a non-empty rootCause (was structurally empty).
+  const mission = new MissionGraph('m', 'audit', 'x')
+  for (const c of [repo, net, web, corr!]) mission.addClaim(c)
+  assert.ok(mission.state().rootCause, 'the mission now has a real rootCause')
 })

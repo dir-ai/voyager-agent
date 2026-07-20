@@ -12,5 +12,6 @@ export { LlmBrain, type Complete, type ChatMessage, type LlmBrainOptions, extrac
 export { ProgrexBrain, progrexComplete, type ProgrexBrainOptions, PROGREX_DEFAULT_MODEL } from './progrex.js'
 export { netBriefToClaim, repoBriefToClaim, browserBriefToClaim } from './adapters.js'
 export { proposeRemediations } from './remediation.js'
+export { correlate } from './correlate.js'
 export { ERROR_CLAIM_CONFIDENCE, USABLE_OBSERVATION_CONFIDENCE } from './constants.js'
 export { VERSION } from './version.js'

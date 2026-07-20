@@ -4,6 +4,7 @@ import { scout } from '@dir-ai/voyager-repo'
 import { observe } from '@dir-ai/voyager-browser'
 import { browserBriefToClaim, netBriefToClaim, repoBriefToClaim } from './adapters.js'
 import { proposeRemediations } from './remediation.js'
+import { correlate } from './correlate.js'
 import { DeterministicBrain, dedupeProbes, type Brain } from './brain.js'
 import { ERROR_CLAIM_CONFIDENCE, USABLE_OBSERVATION_CONFIDENCE } from './constants.js'
 
@@ -222,6 +223,14 @@ export async function runMission(intent: string, input: MissionInput, now: numbe
     if (!claim) continue // not dispatchable RIGHT NOW → skip it, keep exploring the rest
     mission.addClaim(claim)
     cg.recordOutcome(`${probe.sense}.probe`, claim.confidence >= USABLE_OBSERVATION_CONFIDENCE)
+  }
+
+  // ── Correlate: link the senses' entities into cross-sense cause→effect edges so
+  // the mission has a real causal chain + rootCause, not just an aggregation.
+  const correlation = correlate(mission.allClaims(), mission.id, now, concludeGoalId)
+  if (correlation) {
+    mission.addClaim(correlation)
+    log(`correlate: ${correlation.causalChain.length} cross-sense edge(s) (web ↔ repo ↔ net)`)
   }
 
   // ── Infer: the brain fuses the observations into one conclusion ─────────────
