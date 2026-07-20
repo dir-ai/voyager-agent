@@ -1,6 +1,6 @@
-import type { CognitiveClaim, Goal, MissionState, NextProbe } from '@dir-ai/voyager-contract'
+import type { CapabilityGraph, CognitiveClaim, Goal, MissionState, NextProbe } from '@dir-ai/voyager-contract'
 import { newClaim } from '@dir-ai/voyager-contract'
-import { type Brain, DeterministicBrain } from './brain.js'
+import { type Brain, DeterministicBrain, dedupeProbes } from './brain.js'
 import { USABLE_OBSERVATION_CONFIDENCE } from './constants.js'
 
 /** A single turn to the model. Kept minimal + provider-agnostic on purpose. */
@@ -20,7 +20,7 @@ export type Complete = (messages: ChatMessage[]) => Promise<string>
 export interface LlmBrainOptions {
   complete: Complete
   /** Called when the model's output can't be used and the rule-based brain steps in. */
-  onFallback?: (stage: 'decompose' | 'synthesize', reason: string) => void
+  onFallback?: (stage: 'decompose' | 'synthesize' | 'pick', reason: string) => void
 }
 
 /**
@@ -51,6 +51,48 @@ export class LlmBrain implements Brain {
     // The MissionGraph already ranks probes by information gain; the model would
     // only re-rank. Trust the planner's math here.
     return state.bestNextProbe
+  }
+
+  /**
+   * The model ROUTES among the family's capabilities. Given the pooled candidate
+   * probes, each annotated with what the CapabilityGraph has LEARNED (reliability,
+   * cost, utility, whether it mutates), the model chooses the single best next
+   * step by expected utility — so Progrex (or any brain) drives which organ runs
+   * next, not a fixed rule. FAIL-SAFE: any hiccup falls back to the planner's
+   * `bestNextProbe`. Read-only is preferred; a mutating pick stays consent-gated
+   * downstream regardless.
+   */
+  async pickNextAsync(state: MissionState, cg: CapabilityGraph, candidates: readonly NextProbe[]): Promise<NextProbe | null> {
+    const pool = dedupeProbes([...(state.bestNextProbe ? [state.bestNextProbe] : []), ...candidates])
+    if (pool.length <= 1) return pool[0] ?? null
+    try {
+      const menu = pool.slice(0, 8).map((p, i) => {
+        const cap = p.capability ? cg.get(p.capability) : undefined
+        return {
+          i,
+          sense: p.sense,
+          capability: p.capability ?? '(unspecified)',
+          description: p.description.slice(0, 160),
+          expectedInformationGain: round2(p.expectedInformationGain),
+          cost: p.cost ?? cap?.cost ?? null,
+          learnedReliability: cap ? round2(cap.reliability) : null,
+          utility: cap ? round2(cg.utility(cap)) : null,
+          mutating: cap?.mutating ?? false,
+        }
+      })
+      const text = await this.complete([
+        { role: 'system', content: 'You are Voyager\'s router. Choose the SINGLE most useful next probe by expected utility (information gain per unit cost, weighted by the capability\'s LEARNED reliability). Prefer read-only probes; pick a mutating capability only if the goal truly needs it (it stays consent-gated regardless). If nothing is worth doing, stop. Reply with ONLY JSON: {"choose": <index>} or {"choose": null}. No prose, no code fences.' },
+        { role: 'user', content: `OPEN GOALS: ${state.openGoals.map((g) => g.statement).slice(0, 6).join(' | ') || '(none)'}\nBLIND SPOTS: ${state.unknowns.slice(0, 6).join(' | ') || '(none)'}\nCONTRADICTIONS: ${state.contradictions.length}\n\nCANDIDATE PROBES:\n${JSON.stringify(menu, null, 2)}` },
+      ])
+      const raw = extractJson(text) as { choose?: unknown } | null
+      if (raw && raw.choose === null) return null // the model chose to stop
+      const idx = raw && typeof raw.choose === 'number' ? raw.choose : NaN
+      if (Number.isInteger(idx) && idx >= 0 && idx < pool.length) return pool[idx]
+      throw new Error('model returned no valid probe index')
+    } catch (e) {
+      this.onFallback('pick', e instanceof Error ? e.message : String(e))
+      return state.bestNextProbe
+    }
   }
   synthesize(intent: string, missionId: string, claims: readonly CognitiveClaim[], now: number): CognitiveClaim {
     return this.fallback.synthesize(intent, missionId, claims, now)
@@ -112,6 +154,11 @@ export class LlmBrain implements Brain {
       return this.fallback.synthesize(intent, missionId, claims, now)
     }
   }
+}
+
+/** Round to 2 decimals for a compact, stable model-facing menu. */
+function round2(n: number): number {
+  return Math.round(n * 100) / 100
 }
 
 /** Pull the first JSON value out of a model reply that may wrap it in prose or

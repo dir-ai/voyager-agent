@@ -7,6 +7,9 @@ import { DeterministicBrain } from '../dist/brain.js'
 import { LlmBrain, extractJson } from '../dist/llm-brain.js'
 import { runMission } from '../dist/agent.js'
 import { proposeRemediations } from '../dist/remediation.js'
+import { progrexComplete, ProgrexBrain } from '../dist/progrex.js'
+import { CapabilityGraph, seedFamilyCapabilities } from '@dir-ai/voyager-contract'
+import type { MissionState, NextProbe } from '@dir-ai/voyager-contract'
 import { ERROR_CLAIM_CONFIDENCE, USABLE_OBSERVATION_CONFIDENCE } from '../dist/constants.js'
 import { newClaim } from '@dir-ai/voyager-contract'
 
@@ -197,7 +200,9 @@ test('runMission: an LlmBrain drives decompose + synthesize through the async pa
   })
   // A real observation (this very repo) so synthesize has something to fuse —
   // with zero observations, synthesize correctly short-circuits without the model.
-  const { mission } = await runMission('probe this repo', { brain, repoPath: '.' }, NOW)
+  // maxRounds:0 isolates decompose+synthesize (the model's ROUTING via pickNextAsync
+  // is exercised by the dedicated pickNextAsync tests above).
+  const { mission } = await runMission('probe this repo', { brain, repoPath: '.', maxRounds: 0 }, NOW)
   assert.deepEqual(calls, ['decompose', 'synthesize'])
   const infer = mission.allClaims().find((c) => c.operation === 'infer')
   assert.ok(infer)
@@ -260,4 +265,62 @@ test('runMission: the mission surfaces the remediation as a pendingAction, never
   // findings the act claims appear. Here we just assert remediate can be turned off.
   const { mission } = await runMission('audit', { repoPath: '.', remediate: false }, NOW)
   assert.ok(!mission.allClaims().some((c) => c.operation === 'act'), 'remediate:false suppresses act proposals')
+})
+
+// ── Capability-routed pickNext: the MODEL chooses the next organ ─────────────
+function mkState(best: NextProbe | null): MissionState {
+  return { openGoals: [], unknowns: [], contradictions: [], bestNextProbe: best, causalChain: [], rootCause: null, pendingAction: null, satisfied: false }
+}
+const REPO_PROBE: NextProbe = { sense: 'repo', capability: 'repo.scout', description: 'deepen dependency vetting', expectedInformationGain: 0.3, cost: 5 }
+const NET_PROBE: NextProbe = { sense: 'net', capability: 'net.scan', description: 'scan the host surface', expectedInformationGain: 0.5, cost: 8 }
+
+test('pickNextAsync: the model ROUTES — returns the candidate it chose by index', async () => {
+  const cg = new CapabilityGraph(); seedFamilyCapabilities(cg)
+  const brain = new LlmBrain({ complete: async () => '{"choose": 1}' })
+  // pool = [bestNextProbe(0)=repo, net(1)] → the model picks index 1
+  const chosen = await brain.pickNextAsync!(mkState(REPO_PROBE), cg, [NET_PROBE])
+  assert.equal(chosen?.capability, 'net.scan')
+})
+
+test('pickNextAsync: garbage output FAILS SAFE to the planner bestNextProbe', async () => {
+  const cg = new CapabilityGraph(); seedFamilyCapabilities(cg)
+  const brain = new LlmBrain({ complete: async () => 'i really cannot decide' })
+  const chosen = await brain.pickNextAsync!(mkState(REPO_PROBE), cg, [NET_PROBE])
+  assert.equal(chosen?.capability, 'repo.scout') // planner's math stands
+})
+
+test('pickNextAsync: {"choose": null} stops the loop', async () => {
+  const cg = new CapabilityGraph(); seedFamilyCapabilities(cg)
+  const brain = new LlmBrain({ complete: async () => '{"choose": null}' })
+  const chosen = await brain.pickNextAsync!(mkState(REPO_PROBE), cg, [NET_PROBE])
+  assert.equal(chosen, null)
+})
+
+// ── Progrex 5 wired in as the brain (OpenAI-compatible adapter) ──────────────
+test('progrexComplete: maps messages to /chat/completions and returns the content', async () => {
+  let seenUrl = ''; let seenBody: { model?: string } = {}
+  const fetchImpl = (async (url: string, init: { body: string }) => {
+    seenUrl = url; seenBody = JSON.parse(init.body)
+    return { ok: true, json: async () => ({ choices: [{ message: { content: 'hello from progrex' } }] }) }
+  }) as unknown as typeof fetch
+  const complete = progrexComplete({ baseUrl: 'http://x/v1/', model: 'm', fetchImpl })
+  const out = await complete([{ role: 'user', content: 'hi' }])
+  assert.equal(out, 'hello from progrex')
+  assert.equal(seenUrl, 'http://x/v1/chat/completions') // trailing slash trimmed, path appended
+  assert.equal(seenBody.model, 'm')
+})
+
+test('progrexComplete: a non-ok response throws so LlmBrain falls back', async () => {
+  const fetchImpl = (async () => ({ ok: false, status: 503, json: async () => ({}) })) as unknown as typeof fetch
+  const complete = progrexComplete({ baseUrl: 'http://x', fetchImpl })
+  await assert.rejects(() => complete([{ role: 'user', content: 'hi' }]), /503/)
+})
+
+test('ProgrexBrain: a model hiccup degrades decompose to the deterministic arc (fail-safe)', async () => {
+  const fetchImpl = (async () => ({ ok: false, status: 500, json: async () => ({}) })) as unknown as typeof fetch
+  let fellBack = false
+  const brain = new ProgrexBrain({ baseUrl: 'http://x/v1', fetchImpl, onFallback: () => { fellBack = true } })
+  const goals = await brain.decomposeAsync!('audit acme', 'm')
+  assert.ok(fellBack, 'the failing model triggers the fallback')
+  assert.deepEqual(goals.map((g) => g.id), ['g.observe', 'g.assess', 'g.conclude'])
 })

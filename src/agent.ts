@@ -4,7 +4,7 @@ import { scout } from '@dir-ai/voyager-repo'
 import { observe } from '@dir-ai/voyager-browser'
 import { browserBriefToClaim, netBriefToClaim, repoBriefToClaim } from './adapters.js'
 import { proposeRemediations } from './remediation.js'
-import { DeterministicBrain, type Brain } from './brain.js'
+import { DeterministicBrain, dedupeProbes, type Brain } from './brain.js'
 import { ERROR_CLAIM_CONFIDENCE, USABLE_OBSERVATION_CONFIDENCE } from './constants.js'
 
 export interface MissionInput {
@@ -132,7 +132,13 @@ export async function runMission(intent: string, input: MissionInput, now: numbe
   const dispatch = input.dispatch ?? ((probe, ctx) => defaultDispatch(probe, ctx))
   const maxRounds = Math.max(0, input.maxRounds ?? 2)
   for (let round = 0; round < maxRounds; round++) {
-    const probe = brain.pickNext(mission.state())
+    // The model ROUTES when it can: pool every candidate probe the senses
+    // suggested and let pickNextAsync choose by learned capability utility.
+    // A rule-based brain (no pickNextAsync) still uses the planner's bestNextProbe.
+    const state = mission.state()
+    const probe = brain.pickNextAsync
+      ? await brain.pickNextAsync(state, cg, dedupeProbes(mission.allClaims().flatMap((c) => c.suggestedNextProbes)))
+      : brain.pickNext(state)
     if (!probe) break
     // Mark it executed in the mission graph itself, so the planner (bestNextProbe)
     // never re-proposes it — the loop can't spin on the same probe.

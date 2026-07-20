@@ -1,4 +1,4 @@
-import type { CognitiveClaim, Goal, MissionState, NextProbe } from '@dir-ai/voyager-contract'
+import type { CapabilityGraph, CognitiveClaim, Goal, MissionState, NextProbe } from '@dir-ai/voyager-contract'
 import { newClaim } from '@dir-ai/voyager-contract'
 import { USABLE_OBSERVATION_CONFIDENCE } from './constants.js'
 
@@ -20,6 +20,27 @@ export interface Brain {
    *  a brain that only reasons synchronously (e.g. DeterministicBrain) omits them. */
   decomposeAsync?(intent: string, missionId: string): Promise<Goal[]>
   synthesizeAsync?(intent: string, missionId: string, claims: readonly CognitiveClaim[], now: number): Promise<CognitiveClaim>
+  /** Optional model + capability-aware routing. Given the live state, the
+   *  CapabilityGraph (with LEARNED reliability/cost per organ), and the pooled
+   *  candidate probes, the model chooses which capability to exercise next — so it
+   *  routes among ALL the senses/hands by evidence, not by a fixed rule. When
+   *  present, `runMission` prefers it over the sync `pickNext`. */
+  pickNextAsync?(state: MissionState, capabilities: CapabilityGraph, candidates: readonly NextProbe[]): Promise<NextProbe | null>
+}
+
+/** De-duplicate probes by (sense, capability, description) — the pooled menu the
+ *  router chooses from can contain the same suggestion emitted by several senses. */
+export function dedupeProbes(probes: readonly NextProbe[]): NextProbe[] {
+  const seen = new Set<string>()
+  const out: NextProbe[] = []
+  for (const p of probes) {
+    if (!p) continue
+    const key = `${p.sense}|${p.capability ?? ''}|${p.description}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(p)
+  }
+  return out
 }
 
 export class DeterministicBrain implements Brain {

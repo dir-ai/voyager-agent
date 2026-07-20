@@ -7,8 +7,9 @@
 // monolith and WITHOUT acting on production autonomously. The reasoning model is
 // injected (Brain) and swappable.
 export { runMission, type MissionInput, type MissionRun, type ProbeContext } from './agent.js'
-export { type Brain, DeterministicBrain } from './brain.js'
+export { type Brain, DeterministicBrain, dedupeProbes } from './brain.js'
 export { LlmBrain, type Complete, type ChatMessage, type LlmBrainOptions, extractJson } from './llm-brain.js'
+export { ProgrexBrain, progrexComplete, type ProgrexBrainOptions, PROGREX_DEFAULT_MODEL } from './progrex.js'
 export { netBriefToClaim, repoBriefToClaim, browserBriefToClaim } from './adapters.js'
 export { proposeRemediations } from './remediation.js'
 export { ERROR_CLAIM_CONFIDENCE, USABLE_OBSERVATION_CONFIDENCE } from './constants.js'
